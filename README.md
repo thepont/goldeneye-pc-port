@@ -98,9 +98,9 @@ filtering, FOV, sensitivity); Windows and Linux, including Steam Deck.
 
 ### Experimental co-op split screen
 
-The `feature/coop` branch adds two-player co-op with independent spawn
-positions and vertically separated, non-overlapping viewports. This is a live
-Dam capture from the PC renderer:
+Two-player co-op supports independent spawn positions and vertically
+separated, non-overlapping viewports. This is a live Dam capture from the PC
+renderer:
 
 <p align="center">
   <img src="docs/img/coop-split-screen.png" width="100%"
@@ -207,10 +207,9 @@ directionally, on the way to v1.0:
 - General polish: performance, remaining rendering/audio defects, save/config
   robustness.
 
-The experimental co-op implementation shown above is limited to
-`feature/coop` and is not part of the v0.3.0 release. Online (non-LAN)
-multiplayer and ray tracing are not currently planned. If either matters to
-you, open an issue — it helps prioritize.
+The experimental co-op implementation shown above is not part of the v0.3.0
+release. Online (non-LAN) multiplayer and ray tracing are not currently
+planned. If either matters to you, open an issue — it helps prioritize.
 
 ## Beyond playing
 
