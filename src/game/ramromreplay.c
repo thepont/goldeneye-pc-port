@@ -3,6 +3,7 @@
 #ifdef PORT
 #include <stdio.h>
 #include <stdlib.h>
+#include "coop.h"
 #endif
 #include "debugmenu_handler.h"
 #include "lv.h"
@@ -442,7 +443,18 @@ void copy_recorded_ramrom_registers_to_proper_place_ingame(ramromfilestructure *
     g_randomSeed = state->randomseed;
     g_chrObjRandomSeed = state->randomizer;
     gamemode = state->mode;
+#ifdef PORT
+    gamemode = (GAMEMODE)geCoopResumeMode(
+        gamemode, joyGetControllerCount(), GAMEMODE_SOLO, GAMEMODE_MULTI,
+        GAMEMODE_COOP);
+#endif
     selected_num_players = state->numplayers;
+#ifdef PORT
+    if (gamemode == GAMEMODE_COOP)
+    {
+        selected_num_players = GE_COOP_MAX_PLAYERS;
+    }
+#endif
     scenario = state->scenario;
     MP_stage_selected = state->mpstage_sel;
     game_length = state->gamelength;
@@ -647,6 +659,5 @@ u32 check_ramrom_flags(void)
     }
     return 0;
 }
-
 
 

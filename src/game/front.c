@@ -41,6 +41,7 @@
 #ifdef PORT
 #include <stdio.h>
 #include "romdata.h" /* D178: briefing-segment byte-order fixup */
+#include "coop.h"
 #endif
 #include "chrai.h"
 #include "title.h"
@@ -2885,6 +2886,26 @@ void interface_menu06_modesel(void)
             sndPlaySfx(g_musicSfxBufferPtr, DOOR_METAL_CLOSE2_SFX, 0);
         }
     }
+#ifdef PORT
+    else if ((is_cheat_menu_available) && (293.0f <= cursor_v_pos))
+    {
+        mission_difficulty_highlighted = DIFFICULTY_00;
+        if (joyGetButtonsPressedThisFrame(PLAYER_1, START_BUTTON|Z_TRIG|A_BUTTON))
+        {
+            gamemode = GAMEMODE_CHEATS;
+            sndPlaySfx(g_musicSfxBufferPtr, DOOR_METAL_CLOSE_SFX, 0);
+        }
+    }
+    else if ((275.0f <= cursor_v_pos) && (joyGetControllerCount() >= 2))
+    {
+        mission_difficulty_highlighted = DIFFICULTY_007;
+        if (joyGetButtonsPressedThisFrame(PLAYER_1, START_BUTTON|Z_TRIG|A_BUTTON))
+        {
+            gamemode = GAMEMODE_COOP;
+            sndPlaySfx(g_musicSfxBufferPtr, DOOR_METAL_CLOSE_SFX, 0);
+        }
+    }
+#else
     else if ((is_cheat_menu_available) && (275.0f <= cursor_v_pos))
     {
         mission_difficulty_highlighted = DIFFICULTY_00;
@@ -2894,6 +2915,7 @@ void interface_menu06_modesel(void)
             sndPlaySfx(g_musicSfxBufferPtr, DOOR_METAL_CLOSE_SFX, 0);
         }
     }
+#endif
     else if ((243.0f <= cursor_v_pos) && (joyGetControllerCount() >= 2))
     {
         mission_difficulty_highlighted = DIFFICULTY_SECRET;
@@ -2919,6 +2941,12 @@ void interface_menu06_modesel(void)
         sndPlaySfx(g_musicSfxBufferPtr, DOOR_METAL_CLOSE2_SFX, 0);
     }
     frontUpdateControlStickPosition();
+#ifdef PORT
+    if (!is_cheat_menu_available && cursor_v_pos > 284.0f)
+    {
+        cursor_v_pos = 284.0f;
+    }
+#endif
     if (gamemode == GAMEMODE_SOLO)
     {
         frontChangeMenu(MENU_MISSION_SELECT, FALSE);
@@ -2930,6 +2958,21 @@ void interface_menu06_modesel(void)
         frontChangeMenu(MENU_MP_OPTIONS, FALSE);
         return;
     }
+#ifdef PORT
+    if (gamemode == GAMEMODE_COOP)
+    {
+        selected_num_players = geCoopPlayerCount(joyGetControllerCount());
+        reset_mp_options_for_scenario(SCENARIO_NORMAL);
+        player_char[0] = 0;
+        player_char[1] = 1;
+        player_handicap[0] = 5;
+        player_handicap[1] = 5;
+        init_mp_options_for_scenario(selected_num_players);
+        unlock_all_mp_chars();
+        frontChangeMenu(MENU_MP_CHAR_SELECT, FALSE);
+        return;
+    }
+#endif
     if (gamemode == GAMEMODE_CHEATS)
     {
         frontChangeMenu(MENU_CHEAT, FALSE);
@@ -2999,6 +3042,18 @@ Gfx *frontSetupMenuBackground(Gfx *DL)
 void setCursorPOSforMode(int mode)
 {
     cursor_h_pos = 126.0f;
+#ifdef PORT
+    if (mode == GAMEMODE_COOP)
+    {
+        cursor_v_pos = 0x11c;
+        return;
+    }
+    if (mode == GAMEMODE_CHEATS)
+    {
+        cursor_v_pos = 0x12c;
+        return;
+    }
+#endif
     cursor_v_pos = mode * 0x20 + 0xe2;
 }
 
@@ -3064,6 +3119,40 @@ Gfx* constructor_menu06_modesel(Gfx* DL)
     }
     DL = frontPrintText(DL, &x, &y, textstring, ptrFontZurichBoldChars, ptrFontZurichBold, text_color, viGetX(), viGetY(), 0, 0);
 
+#ifdef PORT
+    x = 0x96;
+    y = 0x11C;
+    DL = frontPrintText(DL, &x, &y, "3.\n", ptrFontZurichBoldChars, ptrFontZurichBold, text_color, viGetX(), viGetY(), 0, 0);
+    textstring = "CO-OP\n";
+
+    textMeasure(&x2, &y2, textstring, ptrFontZurichBoldChars, ptrFontZurichBold, 0);
+
+    x = 0xAA;
+    y = 0x11C;
+    if (mission_difficulty_highlighted == DIFFICULTY_007)
+    {
+        DL = microcode_constructor_related_to_menus(DL, 0x94, 0x11A, y2 + 0xAF, 0x12A, 0x32);
+    }
+    DL = frontPrintText(DL, &x, &y, textstring, ptrFontZurichBoldChars, ptrFontZurichBold, text_color, viGetX(), viGetY(), 0, 0);
+
+    if (is_cheat_menu_available != 0)
+    {
+        x = 0x96;
+        y = 0x12C;
+        DL = frontPrintText(DL, &x, &y, "4.\n", ptrFontZurichBoldChars, ptrFontZurichBold, 0xFF, viGetX(), viGetY(), 0, 0);
+        textstring = langGet(getStringID(LTITLE, TITLE_STR_31_CHEATOPTIONS));
+
+        textMeasure(&x2, &y2, textstring, ptrFontZurichBoldChars, ptrFontZurichBold, 0);
+
+        x = 0xAA;
+        y = 0x12C;
+        if (mission_difficulty_highlighted == DIFFICULTY_00)
+        {
+            DL = microcode_constructor_related_to_menus(DL, 0x94, 0x12A, y2 + 0xAF, 0x13A, 0x32);
+        }
+        DL = frontPrintText(DL, &x, &y, textstring, ptrFontZurichBoldChars, ptrFontZurichBold, 0xFF, viGetX(), viGetY(), 0, 0);
+    }
+#else
     if (is_cheat_menu_available != 0)
     {
         x = 0x96;
@@ -3081,6 +3170,7 @@ Gfx* constructor_menu06_modesel(Gfx* DL)
         }
         DL = frontPrintText(DL, &x, &y, textstring, ptrFontZurichBoldChars, ptrFontZurichBold, 0xFF, viGetX(), viGetY(), 0, 0);
     }
+#endif
 
     DL = frontAddPreviousTabText(DL);
     DL = frontDrawCursor(DL);
@@ -3364,7 +3454,11 @@ void interface_menu07_missionsel(void)
     else if (tab_prev_selected != 0)
     {
         frontChangeMenu(MENU_MODE_SELECT, 0);
+#ifdef PORT
+        setCursorPOSforMode(gamemode == GAMEMODE_COOP ? GAMEMODE_COOP : GAMEMODE_SOLO);
+#else
         setCursorPOSforMode(0);
+#endif
     }
 }
 
@@ -4213,7 +4307,11 @@ void unlock_all_mp_chars(void) {
 
 s32 get_selected_num_players(void)
 {
-    if (gamemode == GAMEMODE_MULTI)
+    if (gamemode == GAMEMODE_MULTI
+#ifdef PORT
+        || gamemode == GAMEMODE_COOP
+#endif
+        )
     {
         return selected_num_players;
     }
@@ -4915,6 +5013,13 @@ void init_menu0f_mpcharsel(void)
 {
     s32 i;
 
+#ifdef PORT
+    if (gamemode == GAMEMODE_COOP)
+    {
+        unlock_all_mp_chars();
+    }
+#endif
+
     tab_start_selected = 0;
     tab_next_selected = 0;
     tab_prev_selected = 0;
@@ -5065,7 +5170,29 @@ void interface_menu0F_mpcharsel(void)
             }
             else if (joyGetButtonsPressedThisFrame(i, A_BUTTON|Z_TRIG|START_BUTTON)) // 0xb000
             {
-                if (get_players_who_have_selected_mp_char(mp_char_cur_select_player[i]) == 0)
+                s32 can_select_character;
+
+                can_select_character = get_players_who_have_selected_mp_char(mp_char_cur_select_player[i]) == 0;
+#ifdef PORT
+                if (gamemode == GAMEMODE_COOP)
+                {
+                    s32 selected_characters[GE_COOP_MAX_PLAYERS];
+                    s32 selected_count = 0;
+                    s32 j;
+
+                    for (j = 0; j < numplayers; j++)
+                    {
+                        if (player_has_selected_char[j])
+                        {
+                            selected_characters[selected_count++] = player_char[j];
+                        }
+                    }
+                    can_select_character = geCoopCanSelectCharacter(
+                        selected_characters, selected_count,
+                        mp_char_cur_select_player[i]);
+                }
+#endif
+                if (can_select_character)
                 {
                     player_char[i] = mp_char_cur_select_player[i];
                     size_mp_select_image_player[i] = 1;
@@ -5127,6 +5254,13 @@ void interface_menu0F_mpcharsel(void)
 
     if (ready_players == numplayers)
     {
+#ifdef PORT
+        if (gamemode == GAMEMODE_COOP)
+        {
+            frontChangeMenu(MENU_MISSION_SELECT, 0);
+        }
+        else
+#endif
         frontChangeMenu(MENU_MP_OPTIONS, 0);
     }
 }
@@ -8934,5 +9068,3 @@ Gfx * menu_jump_constructor_handler(Gfx *DL)
 
     return DL;
 }
-
-

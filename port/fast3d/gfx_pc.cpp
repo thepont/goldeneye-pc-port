@@ -31,6 +31,7 @@
 #include "gfx_window_manager_api.h"
 #include "gfx_rendering_api.h"
 #include "gfx_screen_config.h"
+#include "dynamic_lighting.h"
 
 uintptr_t gfxFramebuffer;
 
@@ -62,6 +63,17 @@ uintptr_t gfxFramebuffer;
 #define MAX_VERTEX_COLORS 64
 
 #define TEXTURE_CACHE_MAX_SIZE 1024
+
+/* Port-only camera light. It follows the view origin, so it behaves like a
+ * low-power flashlight without changing the decompiled game logic or N64
+ * light state. The option is deliberately off by default for byte-faithful
+ * rendering; Video.DynamicLighting opts into the PC enhancement. */
+static bool g_dynamic_lighting_enabled = false;
+static constexpr GeDynamicLight kDynamicLight = {
+    {0.0f, 0.0f, 0.0f},
+    900.0f,
+    0.75f,
+};
 
 #define C0(pos, width) ((cmd->words.w0 >> (pos)) & ((1U << width) - 1))
 #define C1(pos, width) ((cmd->words.w1 >> (pos)) & ((1U << width) - 1))
@@ -262,9 +274,19 @@ static int game_framebuffer_msaa_resolved;
 static float g_gpSafeTop = 0.0f;
 static float g_gpSafeHeight = -1.0f;
 static bool g_safe_area_crop_enabled = true;
+/* A two-player GE viewport is roughly half the native frame height, while
+ * the normal single-player NTSC viewport is 220/240 (and PAL is full-height).
+ * The safe-area transform is valid for that single-player inset viewport, but
+ * applying it to each split viewport expands both halves to the whole window
+ * and makes the players overwrite/flicker one another. */
+static bool g_current_viewport_is_split = false;
 
 extern "C" void gfx_set_safe_area_crop(int on) {
     g_safe_area_crop_enabled = !!on;
+}
+
+extern "C" void gfx_set_dynamic_lighting(int on) {
+    g_dynamic_lighting_enabled = !!on;
 }
 
 uint32_t gfx_msaa_level = 1;
@@ -1506,6 +1528,32 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
                 }
             }
 
+            if (g_dynamic_lighting_enabled) {
+                const float (*modelview)[4] =
+                    rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1];
+                const float view_position[3] = {
+                    v->v.ob[0] * modelview[0][0] +
+                        v->v.ob[1] * modelview[1][0] +
+                        v->v.ob[2] * modelview[2][0] + modelview[3][0],
+                    v->v.ob[0] * modelview[0][1] +
+                        v->v.ob[1] * modelview[1][1] +
+                        v->v.ob[2] * modelview[2][1] + modelview[3][1],
+                    v->v.ob[0] * modelview[0][2] +
+                        v->v.ob[1] * modelview[1][2] +
+                        v->v.ob[2] * modelview[2][2] + modelview[3][2],
+                };
+                const float object_normal[3] = {
+                    (float)vcn->x, (float)vcn->y, (float)vcn->z,
+                };
+                float view_normal[3];
+                gfx_transposed_matrix_mul(view_normal, object_normal, modelview);
+                const float intensity = geDynamicLightIntensity(
+                    view_normal, view_position, kDynamicLight);
+                r += intensity * 255.0f;
+                g += intensity * 255.0f;
+                b += intensity * 255.0f;
+            }
+
             d->color.r = r > 255 ? 255 : r;
             d->color.g = g > 255 ? 255 : g;
             d->color.b = b > 255 ? 255 : b;
@@ -2596,7 +2644,8 @@ static void gfx_adjust_viewport_or_scissor(XYWidthHeight* area, bool preserve_as
     // g_gpSafeTop already plays the exact role SCREEN_HEIGHT plays below
     // (both are the bottom-up Y value of the mapped region's TOP edge) --
     // this reduces to the untouched original formula when crop is off.
-    const bool crop = g_safe_area_crop_enabled && g_gpSafeHeight > 0.0f;
+    const bool crop = !g_current_viewport_is_split &&
+                      g_safe_area_crop_enabled && g_gpSafeHeight > 0.0f;
     const float safeTop = crop ? g_gpSafeTop : (float)SCREEN_HEIGHT;
     const float safeHeight = crop ? g_gpSafeHeight : (float)SCREEN_HEIGHT;
     const float ratioY = gfx_current_dimensions.height / safeHeight;
@@ -2614,8 +2663,9 @@ static void gfx_adjust_viewport_or_scissor(XYWidthHeight* area, bool preserve_as
     // TV-overscan margin) and fold it into the same toggle: trim the same
     // fixed 1-unit margin from both edges rather than trying to force
     // content to reach a boundary it may never actually be drawn to.
-    const float safeLeft = g_safe_area_crop_enabled ? 1.0f : 0.0f;
-    const float safeWidth = g_safe_area_crop_enabled ? (float)SCREEN_WIDTH - 2.0f : (float)SCREEN_WIDTH;
+    const bool trim_horizontal_safe_area = !g_current_viewport_is_split && g_safe_area_crop_enabled;
+    const float safeLeft = trim_horizontal_safe_area ? 1.0f : 0.0f;
+    const float safeWidth = trim_horizontal_safe_area ? (float)SCREEN_WIDTH - 2.0f : (float)SCREEN_WIDTH;
     const float ratioX = gfx_current_dimensions.width / safeWidth;
 
     float x1 = (area->x - safeLeft) * ratioX;
@@ -2679,15 +2729,51 @@ static void gfx_calc_and_set_viewport(const Vp_t* viewport) {
     rdp.viewport.width = width;
     rdp.viewport.height = height;
 
+    /* GE's two-player layout uses roughly half-height viewports. Do not apply
+     * the single-player safe-area crop to either half: each raw viewport must
+     * map to its own window rectangle. */
+    g_current_viewport_is_split = height > 1.0f &&
+                                   height < (float)SCREEN_HEIGHT * 0.75f;
+
     /* Cache the raw (pre window-scale) viewport bounds for the safe-area
      * crop above -- guard against a degenerate/zero-height viewport so a
-     * later divide can't ever see one. */
+     * later divide can't ever see one. Split-screen viewports deliberately do
+     * not replace the single-player crop bounds. */
     if (height > 1.0f) {
-        g_gpSafeTop = y;
-        g_gpSafeHeight = height;
+        if (!g_current_viewport_is_split) {
+            g_gpSafeTop = y;
+            g_gpSafeHeight = height;
+        }
     }
 
     gfx_adjust_viewport_or_scissor(&rdp.viewport);
+
+#ifdef PORT
+    {
+        static int trace_enabled = -1;
+        static int trace_count = 0;
+        extern uint32_t num_dls;
+
+        if (trace_enabled < 0) {
+            trace_enabled = getenv("GE_VIEWPORT_TRACE") != nullptr;
+        }
+        /* Keep the early menu trace useful without consuming the budget
+         * before a long scripted co-op menu reaches gameplay. Once a split
+         * viewport appears, retain those records for the BDD assertion. */
+        if (trace_enabled && (g_current_viewport_is_split || trace_count < 48) &&
+            trace_count++ < 512) {
+            fprintf(stderr,
+                    "GE_VIEWPORT_TRACE: dl=%u logical=%d,%d,%d,%d gl=%d,%d,%u,%u\n",
+                    num_dls,
+                    (int)(viewport->vtrans[0] / 4.0f - (viewport->vscale[0] / 4.0f)),
+                    (int)(viewport->vtrans[1] / 4.0f - (viewport->vscale[1] / 4.0f)),
+                    (int)(viewport->vscale[0] / 2.0f),
+                    (int)(viewport->vscale[1] / 2.0f),
+                    (int)rdp.viewport.x, (int)rdp.viewport.y,
+                    (unsigned)rdp.viewport.width, (unsigned)rdp.viewport.height);
+        }
+    }
+#endif
 
     rdp.viewport_or_scissor_changed = true;
 }
@@ -3960,4 +4046,3 @@ extern "C" void gfx_reset_framebuffer(void) {
     gfx_rapi->start_draw_to_framebuffer(0, (float)gfx_current_dimensions.height / SCREEN_HEIGHT);
     active_fb = framebuffers.end();
 }
-

@@ -49,6 +49,11 @@
 #include "stanintersection.h"
 #include "textrelated.h"
 
+#ifdef PORT
+static u32 geViewportSmokeMask;
+extern void exit(int status);
+#endif
+
 #ifdef VERSION_EU
 
     #define BONDVIEW_AUTOAIM_TIME 0x19 /* 25 */
@@ -8250,6 +8255,31 @@ void bondviewMovePlayerUpdateViewport(s8 stick_x, s8 stick_y, u16 buttons)
     viSetBuf(getWidth320or440(), getHeight330or240());
     viSetViewSize(bondviewGetCurrentPlayerViewportWidth(), bondviewGetCurrentPlayerViewportHeight());
     viSetViewPosition(get_curplayer_viewport_ulx(), bondviewGetCurrentPlayerViewportUly());
+#ifdef PORT
+    if (getenv("GE_VIEWPORT_SMOKE") && get_cur_playernum() >= 0 && get_cur_playernum() < 4)
+    {
+        u32 player_bit = (u32)1 << get_cur_playernum();
+
+        if ((geViewportSmokeMask & player_bit) == 0)
+        {
+            geViewportSmokeMask |= player_bit;
+            osSyncPrintf("VIEWPORT_SMOKE: player=%d rect=%d,%d,%d,%d players=%d\n",
+                         (int)get_cur_playernum(),
+                         (int)g_CurrentPlayer->viewleft,
+                         (int)g_CurrentPlayer->viewtop,
+                         (int)g_CurrentPlayer->viewx,
+                         (int)g_CurrentPlayer->viewy,
+                         (int)getPlayerCount());
+        }
+
+        if (getenv("GE_VIEWPORT_SMOKE_EXIT") &&
+            getPlayerCount() >= 2 &&
+            (geViewportSmokeMask & 0x3U) == 0x3U)
+        {
+            exit(0);
+        }
+    }
+#endif
     currentPlayerUpdateColourScreenProperties();
     currentPlayerTickChrFade();
     currentPlayerSetYAutoAimEnabled(cur_player_get_autoaim());
@@ -9290,7 +9320,11 @@ Gfx *maybe_mp_interface(Gfx *gdl)
         }
     }
 
-    if (getPlayerCount() == 1)
+    if (getPlayerCount() == 1
+#ifdef PORT
+        || gamemode == GAMEMODE_COOP
+#endif
+        )
     {
         display_objective_status_text_on_status_change();
     }

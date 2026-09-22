@@ -2,6 +2,8 @@
 #ifdef PORT
 #include <stdio.h>
 #include <stdlib.h>
+#include "coop.h"
+extern GAMEMODE gamemode;
 #endif
 #include <memp.h>
 #include "game/mp_weapon.h"
@@ -1261,7 +1263,11 @@ void proplvreset2(enum LEVELID stageId)
          * There are no slots for the mp stages in setup_text_pointers. The name is created
          * by adding "mp_" after the "U" e.g. "Ump_setuparchZ"
          */
+#ifdef PORT
+        if (geCoopShouldUseDeathmatchSetup(getPlayerCount(), gamemode, GAMEMODE_MULTI))
+#else
         if (getPlayerCount() >= 2)
+#endif
         {
             strcat(strResource, "mp_"); // -> "Ump_"
         }

@@ -55,6 +55,7 @@ static int initDone = 0;
  */
 static int cfgVSync         = 1;   /* swap interval: 0 = off, 1 = on            */
 static int cfgFpsCap        = 60;  /* frame cap in fps; 0 = uncapped (vsync); menu only exposes 30/60 */
+static int cfgDynamicLighting = 0; /* port-only camera point light; off preserves N64 lighting */
 static int cfgMSAA          = 4;   /* 1/2/4/8 samples; default 4 (modern ports ship AA on; snaps down to the highest supported level) */
 static int cfgTexFilter     = 1;   /* 0 = nearest, 1 = bilinear (default), 2 = N64 3-point + trilinear */
 static int cfgFixMipTex     = 1;   /* RC2: clip mip-contaminated texture uploads to base height */
@@ -237,6 +238,7 @@ PD_CONSTRUCTOR static void videoConfigInit(void)
     configRegisterInt("Game.AllUnlocked", &portAllUnlocked, 0, 1);
     configRegisterInt("Video.VSync",         &cfgVSync,      0, 1);
     configRegisterInt("Video.FpsCap",        &cfgFpsCap,     0, 1000);
+    configRegisterInt("Video.DynamicLighting", &cfgDynamicLighting, 0, 1);
     configRegisterInt("Video.MSAA",          &cfgMSAA,       1, 8);
     configRegisterInt("Video.TextureFilter", &cfgTexFilter,  0, 2);
     configRegisterInt("Video.FixMipTextures", &cfgFixMipTex, 0, 1);
@@ -291,6 +293,7 @@ static void videoApplyImageOptions(void)
     portFovScale = (f32)cfgFovScale / 100.0f;
     gfx_set_anisotropy_level(cfgAniso);
     gfx_set_safe_area_crop(cfgSafeAreaCrop);
+    gfx_set_dynamic_lighting(cfgDynamicLighting);
 }
 
 static void videoApplyTexFilter(void)

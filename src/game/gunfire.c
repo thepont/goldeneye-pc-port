@@ -6385,6 +6385,35 @@ void gunSetSightVisible(s32 reason, bool visible)
 void gunDrawSight(s32 *gdl) {
 
 #ifdef PORT
+    static int sight_trace_enabled = -1;
+    static int sight_trace_aiming = -1;
+    static int sight_trace_drawn = -1;
+    static int sight_trace_mode = -1;
+    static int sight_trace_menu = -1;
+    const int sight_aiming =
+        (g_CurrentPlayer->gunsightmode & GUNSIGHTREASON_NOTAIMING) == 0;
+    const int sight_drawn =
+        g_CurrentPlayer->gunsightmode == 0 && g_CurrentPlayer->mpmenuon == FALSE;
+
+    if (sight_trace_enabled < 0) {
+        sight_trace_enabled = getenv("GE_SIGHT_TRACE") != NULL;
+    }
+    if (sight_trace_enabled &&
+        (sight_trace_aiming != sight_aiming || sight_trace_drawn != sight_drawn ||
+         sight_trace_mode != g_CurrentPlayer->gunsightmode ||
+         sight_trace_menu != g_CurrentPlayer->mpmenuon)) {
+        osSyncPrintf("GE_SIGHT_TRACE: player=%d aiming=%d drawn=%d mode=%d mpmenu=%d\n",
+                     (int)get_cur_playernum(), sight_aiming, sight_drawn,
+                     (int)g_CurrentPlayer->gunsightmode,
+                     (int)g_CurrentPlayer->mpmenuon);
+        sight_trace_aiming = sight_aiming;
+        sight_trace_drawn = sight_drawn;
+        sight_trace_mode = g_CurrentPlayer->gunsightmode;
+        sight_trace_menu = g_CurrentPlayer->mpmenuon;
+    }
+#endif
+
+#ifdef PORT
     /* D137: sp54 holds a Gfx* the whole time (`sp54 = *gdl`, then passed as
      * `&sp54` to texSelect/display_image_at_position which take Gfx**). As an
      * N64 `s32` it is 4 bytes, so `*(Gfx**)&sp54` reads 4 bytes of adjacent

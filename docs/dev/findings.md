@@ -608,6 +608,7 @@ covers D24–D69; the log continues in §H (D32 procedure, D70–D121).
 | D320 | **D318-class sweep: aim-hold → `_update` AI lists in 8 levels carry the same as-authored softlock race (static analysis, 2026-09-20).** — full `## D320` entry at file tail | OPEN — static sweep complete (Facility ai_19, Control ai_9, Depot ai_12 flagged high/med-high; Bond-combat loops likely safe); no live confirmation beyond D318 itself; probe-verify path + generalized-watchdog recommendation documented. |
 | D321 | **D318 trigger chain fully mapped: tanks → combat bit is an authored ~3.5 s gas-cascade delay (chr 254 script); derail lands same-tick; PC behavior confirmed faithful to N64 (probe captures, 2026-09-20).** — full `## D321` entry at file tail | CLOSED — trigger chain mapped and faithful; D318 watchdog validated in live play. Optional deferred tuning: `D318_DEADLOCK_TICKS` 600→300 (user's call). |
 | D322 | **Long-session audio degradation: full campaign on v0.3.0 — audio progressively worsens from Silo, by Caverns/Cradle the OST is inaudible and SFX "come and go"; restarting the game restores it (issue #87, user report, 2026-09-21).** — full `## D322` entry at file tail | OPEN — static triage done (teardown audit, mixer statelessness, D202-coverage check); ranked hypotheses: voice-pool exhaustion/counter drift > queue starvation > evtq saturation. `GE_D322` pool-telemetry probe shipped; needs a campaign capture with `GE_D322=1 GE_D204=1`. |
+| D323 | **RULE-2-SIGNOFF: local two-player co-op mode reusing the deathmatch character roster (user request, 2026-09-22).** — full `## D323` entry at file tail | PARTIAL — RULE-2-SIGNOFF / IMPLEMENTED; automated gates pass, while a real two-controller playtest remains owed. |
 
 Phase 2 replaced the Phase-1 demo loop with the real `mainproc()` on real OS
 threads, compiled GE's real `src/sched.c`, and brought in PD's fast3d software
@@ -12239,3 +12240,38 @@ Full campaign (or at minimum Silo → Caverns/Cradle) with **`GE_D322=1 GE_D204=
 - All pools healthy while audio is bad → back to the mixer/reverb state classes (re-open M-65's ruled-out list with a long-session `GE_AUDIODUMP`).
 
 **Status:** OPEN — static triage complete, probe shipped, awaiting campaign capture. Cross-ref: D202/M-65+M-66b (ownerless-loop leak class + expiration), D207 (8-cap starvation design notes), D305 (pool/list desync observation), D204 (pipeline pacing + `GE_D204` monitor), D248/D250 (frame pacing, fixed), issue #87.
+
+## D323 — RULE-2-SIGNOFF: local two-player co-op mode reusing the deathmatch character roster (user request, 2026-09-22).
+
+**Request.** Add a PC-only local two-player split-screen co-op mode. Players must be able to choose characters from the same roster used by deathmatch, play missions from the solo mission list, share the normal mission objectives, and fail the mission only when both players are dead. This is local play only; network multiplayer is not part of the request.
+
+**Exact game locations at sign-off (before the change).**
+
+- `src/bondconstants.h:1523-1529` has no co-op game mode.
+- `src/game/front.c:2848-2942` exposes only solo, deathmatch, and cheats in the mode-select flow; `src/game/front.c:2999-3003` maps the mode enum directly to menu cursor positions.
+- `src/game/front.c:4214-4221` returns the selected player count only for `GAMEMODE_MULTI`, so the solo mission path constructs one viewport/player even when two local controllers are present.
+- `src/game/front.c:4914-5131` owns the existing deathmatch roster/character-select flow, but unconditionally sends a completed selection to `MENU_MP_OPTIONS`.
+- `src/game/lv.c:1075-1259` applies deathmatch timers, kill-limit awards, and scenario end rules to every run with at least two players; its all-dead handling is tied to the deathmatch block rather than a co-op mode.
+- `src/boss.c:473-486` already constructs multiple local viewports when `get_selected_num_players()` reports two or more players; this is the reusable split-screen boundary.
+
+**Proof of the requested behavior gap.** This is a new PC feature, not a claim that the byte-identical N64 game is divergent: the existing code has no co-op entry point, the solo mode hardcodes one selected player, and the existing two-player path is deathmatch-specific. The source trace above is the reproducible baseline showing that the requested user journey cannot currently be reached. No N64 reference behavior is being “repaired”; the user explicitly requested an extension to the PC port.
+
+**Why this cannot be expressed in `port/` or under the ABI/layout exception.** The change must add a selectable game mode, route menu state through character and solo-mission selection, make the selected player count reach the stage bootstrap, and give the two-player run different end-of-game semantics. Those are `src/game` policy/state-machine decisions, not OS, renderer, input-device, storage, or hardware-adapter behavior. No pointer-width, struct-layout, or serialized-record misread is involved.
+
+**Proposed scoped change.** Under `#ifdef PORT`, add `GAMEMODE_COOP`; add a co-op row to the existing mode selector; enter the existing multiplayer character selector with the full 64-entry deathmatch roster and exactly two local players; then route into the existing solo mission/difficulty/briefing flow. Reuse the existing viewport construction. In the level manager, preserve shared solo objectives while suppressing deathmatch timers, kill awards, and scenario rules, and transition to mission failure after both co-op players have completed their death state. Add pure port-owned policy tests for controller-to-player-count selection, roster bounds/duplicate rejection, and the both-dead boundary matrix. No N64 build path changes are allowed. No matching co-op implementation was found in the available same-engine reference checkout, so no same-engine precedent is claimed here.
+
+**Grant (2026-09-22, in-thread).** After the above scope was stated, the user explicitly replied: “Yea do that!” This is the requested go-ahead for this specific `src/game` behavior change.
+
+**Resulting implementation.**
+
+- `src/bondconstants.h:1523-1533` adds `GAMEMODE_COOP` only in the PC build.
+- `src/game/front.c:2849-2980, 3042-3178, 4304-4315, 5008-5261` adds the controller-gated mode row, keeps the full 64-entry deathmatch roster available, rejects duplicate character picks through the port policy helper, and routes ready co-op players into the solo mission/difficulty/briefing path.
+- `src/game/lv.c:512-520, 1079-1111` keeps co-op character/aim setup while suppressing deathmatch timers and awards, then fails the mission only after both players' death animations and fades have completed.
+- `src/game/bondview2.c:9293-9300` displays the shared solo objective-status path in both co-op viewports.
+- `port/include/coop.h`, `port/src/coop.c`, and `tests/coop_test.cpp` own and test the pure controller-count, roster-boundary, duplicate-selection, and both-dead policy.
+
+**Automated verification (2026-09-22).** The new co-op test was first run against the missing implementation and failed at the include boundary. After implementation, the pure co-op, dynamic-lighting, and fake-controller tests passed; the PC BDD runner passed solo launch, direct two-player deathmatch launch, menu co-op launch, solo resume, two-controller co-op resume, and one-controller co-op-to-solo resume. The BDD smoke probes also verified two distinct co-op spawn positions and both active top/bottom viewport rectangles. The full PC target `ge007.x86_64` linked successfully and `git diff --check` was clean. The N64 build was not run because the requested behavior is explicitly behind `PORT` and the local N64 toolchain is not part of this PC verification.
+
+**Remaining evidence.** A real two-controller interactive playtest is still owed: this session used deterministic fake controller channels and no second physical gamepad was available. Hardware-specific controller enumeration, button mappings, and the live death/failure journey therefore remain outside the automated evidence. The implementation is local-only; no network co-op was added.
+
+**Status:** **RULE-2-SIGNOFF / IMPLEMENTED — automated and fake-controller BDD verification passed (2026-09-22); hardware playtest remains owed.**

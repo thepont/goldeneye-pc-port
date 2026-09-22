@@ -51,8 +51,8 @@ void videoResetTextureCache(void);
 /* Current FPS (measured). */
 float videoGetFPS(void);
 
-/* Re-apply the live-tunable [Video] knobs (VSync / FpsCap / TextureFilter) on
- * the next frame start. Called by the F10 options overlay after an edit. */
+/* Re-apply the live-tunable [Video] knobs on the next frame start. Called by
+ * the F10 options overlay after an edit. */
 void videoRequestLiveConfig(void);
 
 /* F10 options overlay -> window/fullscreen changes. The overlay input handler

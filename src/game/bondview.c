@@ -45,6 +45,10 @@
 #include "stanintersection.h"
 #include "textrelated.h"
 
+#ifdef PORT
+#include "coop.h"
+#endif
+
 #ifdef VERSION_EU
 
     #define BONDVIEW_AUTOAIM_TIME 0x19 /* 25 */
@@ -1281,8 +1285,21 @@ s32 bondviewGetRandomSpawnPadIndex(void)
             osSyncPrintf("Distance from player %d (%f, %f)->(%f, %f)= %f\n", player_index, pad->pos.x, pad->pos.z, player_prop->pos.x, player_prop->pos.z, dist);
 #endif
 
-            // if pad is within 1000, don't pick it
+            // Deathmatch keeps its wide safety radius. Co-op missions are
+            // authored as solo spaces, so the nearest valid second pad is
+            // preferable to falling back onto player one's only intro pad.
+#ifdef PORT
+            if (gamemode == GAMEMODE_COOP)
+            {
+                if (!geCoopSpawnPadIsDistinct(diff_x, diff_z, 100.0f))
+                {
+                    enemy_nearby = TRUE;
+                }
+            }
+            else if (dist < 1000)
+#else
             if (dist < 1000)
+#endif
             {
 #ifdef DEBUG
                 osSyncPrintf("Too close to player %d (closer than 10m)\n", player_index);

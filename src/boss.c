@@ -3,6 +3,8 @@
 #ifdef PORT
 #include <stdlib.h>
 #include <stdio.h>
+#include "coop.h"
+extern void exit(int status);
 #endif
 #include "bondview.h"
 #include <bondconstants.h>
@@ -282,6 +284,26 @@ void bossInitMainthreadData(void)
     null_init_main_3();
     init_player_gait_object();
     initGameData();
+#ifdef PORT
+    {
+        const char *resumeMode = getenv("GE_RESUME_MODE");
+
+        if (resumeMode != NULL && resumeMode[0] != '\0')
+        {
+            gamemode = (GAMEMODE)geCoopParseMode(
+                resumeMode, GAMEMODE_SOLO, GAMEMODE_MULTI, GAMEMODE_COOP,
+                GAMEMODE_INTRO);
+
+            /* The deterministic PC resume harness has no save-record player
+             * count to restore. Keep the multiplayer/co-op viewport contract
+             * explicit so its BDD scenarios exercise both cameras. */
+            if (gamemode == GAMEMODE_MULTI || gamemode == GAMEMODE_COOP)
+            {
+                selected_num_players = GE_COOP_MAX_PLAYERS;
+            }
+        }
+    }
+#endif
     fileResetRamRomSave();
     clear_ramrom_block_buffer_heading_ptrs();
 }
@@ -391,7 +413,15 @@ void bossMainloop(void)
         fileValidateSaves();
         fileSetCurrentFolder(FOLDER1);
         set_selected_difficulty(DIFFICULTY_AGENT);
+#ifdef PORT
+        GAMEMODE previousMode = gamemode;
         set_solo_and_ptr_briefing(g_StageNum);
+        gamemode = (GAMEMODE)geCoopResumeMode(
+            previousMode, joyGetControllerCount(), GAMEMODE_SOLO,
+            GAMEMODE_MULTI, GAMEMODE_COOP);
+#else
+        set_solo_and_ptr_briefing(g_StageNum);
+#endif
 
         if (tokenFind(1, "-hard"))
         {
@@ -481,9 +511,45 @@ void bossMainloop(void)
         }
 
         init_player_data_ptrs_construct_viewports(localSelectedNumPlayers);
+#ifdef PORT
+        if (getenv("GE_STAGE_SMOKE") && g_StageNum != LEVELID_TITLE)
+        {
+            osSyncPrintf("STAGE_SMOKE: mode=%d stage=%d players=%d viewports=%d\n",
+                         (int)gamemode, (int)g_StageNum,
+                         (int)getPlayerCount(), (int)localSelectedNumPlayers);
+        }
+        if (getenv("GE_COOP_SMOKE") && gamemode == GAMEMODE_COOP)
+        {
+            osSyncPrintf("COOP_SMOKE: stage=%d players=%d viewports=%d\n",
+                         (int)g_StageNum, (int)getPlayerCount(),
+                         (int)localSelectedNumPlayers);
+        }
+#endif
         dynInitMemory();
         joyCheckStatusThreadSafe();
         lvlStageLoad(g_StageNum);
+#ifdef PORT
+        if (getenv("GE_STAGE_SMOKE") && g_StageNum != LEVELID_TITLE)
+        {
+            s32 smokePlayer;
+
+            for (smokePlayer = 0; smokePlayer < getPlayerCount(); smokePlayer++)
+            {
+                struct player *smoke = g_playerPointers[smokePlayer];
+                osSyncPrintf("STAGE_PLAYER: player=%d pos=%.2f,%.2f,%.2f viewport=%d,%d,%d,%d\n",
+                             (int)smokePlayer,
+                             (double)smoke->prop->pos.f[0],
+                             (double)smoke->prop->pos.f[1],
+                             (double)smoke->prop->pos.f[2],
+                             (int)smoke->viewleft, (int)smoke->viewtop,
+                             (int)smoke->viewx, (int)smoke->viewy);
+            }
+        }
+        if (getenv("GE_STAGE_SMOKE_EXIT") && g_StageNum != LEVELID_TITLE)
+        {
+            exit(0);
+        }
+#endif
         viInitBuffers();
         debmenuRefresh();
         waitForNextFrame();

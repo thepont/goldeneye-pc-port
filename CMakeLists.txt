@@ -48,6 +48,8 @@ endif()
 # (port/src/romassets_<region>.s, see scripts/gen_romassets.py).
 project(ge007 C CXX ASM)
 
+include(CTest)
+
 include(TargetArch)
 include(FindPkgConfig)
 
@@ -581,6 +583,35 @@ target_link_libraries(ge007 ${LIBS})
 set_target_properties(ge007 PROPERTIES OUTPUT_NAME "${BIN_NAME}")
 if(WIN32)
   set_target_properties(ge007 PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
+if(BUILD_TESTING)
+  add_executable(ge007_dynamic_lighting_test
+    tests/dynamic_lighting_test.cpp)
+  target_compile_features(ge007_dynamic_lighting_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_dynamic_lighting
+           COMMAND ge007_dynamic_lighting_test)
+
+  add_executable(ge007_coop_test
+    tests/coop_test.cpp
+    port/src/coop.c)
+  target_include_directories(ge007_coop_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  add_test(NAME ge007_coop
+           COMMAND ge007_coop_test)
+
+  add_executable(ge007_fake_controller_test
+    tests/fake_controller_test.cpp
+    port/src/input_harness.c)
+  target_include_directories(ge007_fake_controller_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  add_test(NAME ge007_fake_controller
+           COMMAND ge007_fake_controller_test)
+
+  add_test(NAME ge007_pc_bdd
+           COMMAND bash "${CMAKE_SOURCE_DIR}/tests/run_pc_bdd.sh")
+  set_tests_properties(ge007_pc_bdd
+    PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 
 message(STATUS "Output binary: ${BIN_NAME}")

@@ -2,6 +2,8 @@
 #include <math.h>
 #ifdef PORT
 #include <stdlib.h>
+#include "coop.h"
+#include <boss.h>
 #endif
 #include <os_extension.h>
 #include <PR/libaudio.h>
@@ -507,8 +509,13 @@ void lvlStageLoad(s32 stage)
                     g_playerPlayerData[s3].player_perspective_height = get_player_mp_char_height(s3);
                 }
 
-                lvlSetMpTime(get_mp_timelimit());
-                lvlSetMpPoint(get_mp_pointlimit());
+#ifdef PORT
+                if (gamemode != GAMEMODE_COOP)
+#endif
+                {
+                    lvlSetMpTime(get_mp_timelimit());
+                    lvlSetMpPoint(get_mp_pointlimit());
+                }
                 copy_aim_settings_to_playerdata();
             }
 
@@ -786,6 +793,13 @@ Gfx* lvlRender(Gfx* DL)
             }
 
             DL = viSetupScreensForNumPlayers(DL);
+#ifdef PORT
+            /* viSetupScreensForNumPlayers restores the full-frame scissor
+             * after drawing multiplayer gutters. Re-apply the active player
+             * rectangle before sky/room/HUD rendering so every pass is
+             * clipped to this player's split-screen viewport, as in PD. */
+            DL = bgScissorCurrentPlayerViewDefault(DL);
+#endif
             DL = skyRender(DL);
             bgRoomVisibilityRelated();
             propsTick();
@@ -1072,6 +1086,35 @@ void lvlManageMpGame(void)
         }
     }
 
+#ifdef PORT
+    if (gamemode == GAMEMODE_COOP)
+    {
+        if ((get_mission_state() == MISSION_STATE_6) &&
+            (g_CurrentStageToLoad != LEVELID_TITLE))
+        {
+            s32 coop_dead_count = 0;
+            s32 i;
+
+            for (i = 0; i < getPlayerCount(); i++)
+            {
+                if (g_playerPointers[i]->bonddead != FALSE &&
+                    g_playerPointers[i]->redbloodfinished &&
+                    g_playerPointers[i]->deathanimfinished)
+                {
+                    coop_dead_count++;
+                }
+            }
+
+            if (geCoopShouldMissionFail(getPlayerCount(), coop_dead_count))
+            {
+                g_isBondKIA = TRUE;
+                set_missionstate(MISSION_STATE_1);
+                bossRunTitleStage();
+            }
+        }
+    }
+    else
+#endif
     if ((getPlayerCount() >= 2) && (g_CurrentStageToLoad != LEVELID_TITLE))
     {
         if (get_mission_state() == MISSION_STATE_6)
@@ -1746,5 +1789,3 @@ f32 lvlGetPowerOnTimeSec(void)
 {
     return g_PowerOnTimeSec;
 }
-
-

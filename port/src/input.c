@@ -79,6 +79,7 @@
 #include "system.h"
 #include "config.h"
 #include "input.h"
+#include "input_harness.h"
 #include "optionsoverlay.h"
 /* D194 absolute aim: read-only access to the live camera (struct player).
  * Game header pulled in through the same shim path every other compiled game
@@ -272,6 +273,7 @@ static void applyCursorVisibility(void);
 
 static int numControllers = 1;
 static int connectedMask   = 0x1;   /* controller 0 always present */
+static int fakeControllerCount = 0; /* GE_FAKE_CONTROLLERS, test harness only */
 
 static SDL_GameController *pads[MAX_PADS];
 static int padShoulderPrev[MAX_PADS];   /* LB/RB edge state for weapon cycling */
@@ -418,6 +420,17 @@ static int    lastMenuMouseX = -1, lastMenuMouseY = -1;  /* WI-2: last abs curso
 
 static void inputOpenPads(void)
 {
+    fakeControllerCount = geInputFakeControllerCount(getenv("GE_FAKE_CONTROLLERS"));
+    if (fakeControllerCount > 0)
+    {
+        connectedMask = (1 << fakeControllerCount) - 1;
+        numControllers = fakeControllerCount;
+        sysLogPrintf(LOG_NOTE,
+                     "input: fake controller harness enabled (%d controller(s))",
+                     fakeControllerCount);
+        return;
+    }
+
     connectedMask = 0x1;
     int n = SDL_NumJoysticks();
     for (int i = 0; i < n && i < MAX_PADS; ++i) {
@@ -459,7 +472,10 @@ static void inputOpenPads(void)
  * SUSTAINED: the stick stays deflected until a later entry changes it; SNONE
  * re-centres it. "Frame" = count of controller-0 reads since launch (roughly
  * 2 per rendered frame -- watch GE_INPUTLOG to calibrate). Unset env => no
- * effect; when set it is the ONLY controller-0 input source. */
+ * effect; when set it is the ONLY controller-0 input source. When the
+ * GE_FAKE_CONTROLLERS harness is active, fake controller channels mirror the
+ * deterministic controller-0 script so menu smoke tests can ready both
+ * players without SDL devices. */
 #define INPUTSCRIPT_MAX     64
 #define INPUTSCRIPT_PULSE   6
 
@@ -469,6 +485,9 @@ static int  scriptCount   = -1;   /* -1 = not parsed yet, 0 = parsed empty */
 static long scriptFrame   = 0;
 static int  scriptCurSX   = 0;    /* stick set by the last scriptApply() */
 static int  scriptCurSY   = 0;
+static unsigned fakeScriptButton = 0;
+static int fakeScriptSX = 0;
+static int fakeScriptSY = 0;
 
 /* Apply one token to `e`. Buttons: A B Z START L R UP DOWN LEFT RIGHT CUP
  * CDOWN CLEFT CRIGHT (D-pad/C-buttons). Analog stick: SUP SDOWN SLEFT SRIGHT
@@ -1220,6 +1239,16 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
         button = scriptApply(button);
         sx = scriptCurSX;
         sy = scriptCurSY;
+        fakeScriptButton = button;
+        fakeScriptSX = sx;
+        fakeScriptSY = sy;
+    } else if (idx > 0 && idx < fakeControllerCount && scriptIsActive()) {
+        /* BDD smoke tests use the same deterministic button pulse for both
+         * fake pads. The game still reads distinct controller channels, so
+         * each player can ready a different default roster character. */
+        button = fakeScriptButton;
+        sx = fakeScriptSX;
+        sy = fakeScriptSY;
     }
 
     if (sx > STICK_MAX)  sx = STICK_MAX;

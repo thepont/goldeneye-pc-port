@@ -1525,7 +1525,10 @@ typedef enum GAMEMODE
     GAMEMODE_INTRO = -1,
     GAMEMODE_SOLO,
     GAMEMODE_MULTI,
-    GAMEMODE_CHEATS
+    GAMEMODE_CHEATS,
+#ifdef PORT
+    GAMEMODE_COOP
+#endif
 } GAMEMODE;
 
 typedef enum GUN_ANIMATION_STATE_IDS
@@ -3123,7 +3126,16 @@ enum CCRMLUT
     //Canonical name and style "ai_destroyobj 2 : (def->obj == PROP_ELVIS_SAUCER)\n"
     typedef enum PROP
     {
+#ifdef PORT
+        /* PC compilers otherwise choose an unsigned underlying type because
+         * every PROP enumerator is non-negative. getPropForHeldItem() uses
+         * -1 as the intentional "no held model" sentinel, so preserve that
+         * signed contract without changing any N64 enumerator values. */
+        PROP_NONE = -1,
+        PROP_ALARM1 = 0,
+#else
         PROP_ALARM1,              /* Beta Alarm / Default Multi Weapon                                  */
+#endif
         PROP_ALARM2,              /* Alarm                                                              */
         PROP_EXPLOSIONBIT,        /* White Pyramid (Explosion Bit)                                      */
         PROP_AMMO_CRATE1,         /* Ammo Crate (Brown w/ Edge Brace, 6x240 Black)                      */
@@ -4900,4 +4912,3 @@ typedef enum PROJECTILES
 #pragma endregion
 
 #endif
-

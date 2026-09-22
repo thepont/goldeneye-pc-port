@@ -2,6 +2,7 @@
 #ifdef PORT
 #include <stdio.h>
 #include <stdlib.h>
+#include "coop.h"
 #endif
 #include <memp.h>
 #include <bondconstants.h>
@@ -24,6 +25,133 @@
  * Address 0x8002A780.
 */
 struct coord3d default_start_position = { 0 };
+
+#ifdef PORT
+#define GE_COOP_MIN_START_DISTANCE 100.0f
+
+static PadRecord geCoopFallbackStartPad;
+
+static int bondviewHasDistinctCoopStartPads(void)
+{
+    s32 first;
+    s32 second;
+
+    for (first = 0; first < startpadcount; first++)
+    {
+        for (second = first + 1; second < startpadcount; second++)
+        {
+            f32 delta_x = g_Startpad[first]->pos.f[0] - g_Startpad[second]->pos.f[0];
+            f32 delta_z = g_Startpad[first]->pos.f[2] - g_Startpad[second]->pos.f[2];
+
+            if (geCoopSpawnPadIsDistinct(delta_x, delta_z,
+                                         GE_COOP_MIN_START_DISTANCE))
+            {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* Solo setup files often contain one intro spawn even though their pad graph
+ * has many valid navigation pads. Co-op keeps that authored mission setup,
+ * but needs a second safe location before the second player is initialized. */
+static void bondviewEnsureDistinctCoopStartPads(void)
+{
+    PadRecord *pad;
+    PadRecord *origin;
+    PadRecord *best = NULL;
+    f32 best_distance_squared = 0.0f;
+    s32 first_valid_pad_found = 0;
+
+    if (gamemode != GAMEMODE_COOP ||
+        getPlayerCount() < GE_COOP_MAX_PLAYERS ||
+        g_CurrentSetup.pads == NULL)
+    {
+        return;
+    }
+
+    /* Preserve all authored start pads when they already describe a real
+     * split start. The fallback is only for the missing/degenerate case. */
+    if (!geCoopSpawnPadNeedsFallback(getPlayerCount(), startpadcount) &&
+        bondviewHasDistinctCoopStartPads())
+    {
+        return;
+    }
+
+    if (startpadcount == 0)
+    {
+        for (pad = g_CurrentSetup.pads; pad->plink != NULL; pad++)
+        {
+            if (pad->stan != NULL)
+            {
+                g_Startpad[startpadcount++] = pad;
+                break;
+            }
+        }
+    }
+
+    if (startpadcount == 0)
+    {
+        return;
+    }
+
+    origin = g_Startpad[0];
+    for (pad = g_CurrentSetup.pads; pad->plink != NULL; pad++)
+    {
+        f32 delta_x;
+        f32 delta_z;
+        f32 distance_squared;
+
+        if (pad == origin || pad->stan == NULL)
+        {
+            continue;
+        }
+
+        delta_x = pad->pos.f[0] - origin->pos.f[0];
+        delta_z = pad->pos.f[2] - origin->pos.f[2];
+        if (!geCoopSpawnPadIsDistinct(delta_x, delta_z,
+                                      GE_COOP_MIN_START_DISTANCE))
+        {
+            continue;
+        }
+
+        distance_squared = (delta_x * delta_x) + (delta_z * delta_z);
+        if (!first_valid_pad_found || distance_squared < best_distance_squared)
+        {
+            best = pad;
+            best_distance_squared = distance_squared;
+            first_valid_pad_found = 1;
+        }
+    }
+
+    if (best != NULL && startpadcount < 16)
+    {
+        g_Startpad[startpadcount++] = best;
+        return;
+    }
+
+    /* A valid setup should always have another pad. Keep the contract even
+     * for a malformed/custom setup by placing a second point along the
+     * authored pad's facing direction on the same collision tile. */
+    if (startpadcount < 16)
+    {
+        geCoopFallbackStartPad = *origin;
+        geCoopFallbackStartPad.pos.f[0] += origin->look.f[0] * GE_COOP_MIN_START_DISTANCE;
+        geCoopFallbackStartPad.pos.f[2] += origin->look.f[2] * GE_COOP_MIN_START_DISTANCE;
+        if (!geCoopSpawnPadIsDistinct(
+                geCoopFallbackStartPad.pos.f[0] - origin->pos.f[0],
+                geCoopFallbackStartPad.pos.f[2] - origin->pos.f[2],
+                GE_COOP_MIN_START_DISTANCE))
+        {
+            geCoopFallbackStartPad.pos.f[0] += GE_COOP_MIN_START_DISTANCE;
+        }
+        g_Startpad[startpadcount++] = &geCoopFallbackStartPad;
+        osSyncPrintf("COOP_SPAWN_FALLBACK: generated distinct second start pad\n");
+    }
+}
+#endif
 
 u32 weaponLoadProjectileModels(ITEM_IDS modelid)
 {
@@ -383,6 +511,25 @@ void bondviewLoadSetupIntroSection(void)
         }
     }
 
+#ifdef PORT
+    bondviewEnsureDistinctCoopStartPads();
+    if (getenv("GE_COOP_SPAWN_LOG") && gamemode == GAMEMODE_COOP)
+    {
+        s32 spawn_index;
+
+        osSyncPrintf("COOP_SPAWN_PADS: player=%d count=%d\n",
+                     (int)get_cur_playernum(), (int)startpadcount);
+        for (spawn_index = 0; spawn_index < startpadcount; spawn_index++)
+        {
+            osSyncPrintf("COOP_SPAWN_PAD: index=%d pos=%.2f,%.2f,%.2f\n",
+                         (int)spawn_index,
+                         (double)g_Startpad[spawn_index]->pos.f[0],
+                         (double)g_Startpad[spawn_index]->pos.f[1],
+                         (double)g_Startpad[spawn_index]->pos.f[2]);
+        }
+    }
+#endif
+
     bondinvAddInvItem(ITEM_FIST);
 
     if (set_starting_weapon == 0)
@@ -404,6 +551,14 @@ void bondviewLoadSetupIntroSection(void)
         {
             rand_pad_index = 0;
         }
+
+#ifdef PORT
+        if (getenv("GE_COOP_SPAWN_LOG") && gamemode == GAMEMODE_COOP)
+        {
+            osSyncPrintf("COOP_SPAWN_CHOICE: player=%d index=%d\n",
+                         (int)get_cur_playernum(), (int)rand_pad_index);
+        }
+#endif
 
 #ifdef DEBUG
         assert(g_Startpad[rand_pad_index]->stan); //              (".\\ported\\bondview_r.cpp",0x171,"Assertion failed: g_Startpad[sp]->stan");
