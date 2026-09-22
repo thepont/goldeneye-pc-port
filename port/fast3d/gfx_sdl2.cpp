@@ -8,6 +8,7 @@
 #include "gfx_window_manager_api.h"
 #include "gfx_screen_config.h"
 #include "input.h"
+#include "ascension_postfx.h"
 
 static SDL_Window* wnd;
 static SDL_GLContext ctx;
@@ -231,6 +232,7 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
 }
 
 static void gfx_sdl_close(void) {
+    ascensionPostFxShutdown();
     is_running = false;
 }
 
@@ -443,6 +445,10 @@ static void gfx_sdl_swap_buffers_begin(void) {
     if (target_fps) {
         sync_framerate_with_timer();
     }
+    /* Apply presentation-only processing while the composited frame is still
+     * in the back buffer. The existing capture hook follows it, so screenshots
+     * represent the same image the player sees. */
+    ascensionPostFxApply();
     if (gfx_pre_swap_hook) {
         gfx_pre_swap_hook();
     }

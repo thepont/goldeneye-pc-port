@@ -65,6 +65,10 @@ static GLenum gl_mirror_clamp = GL_MIRROR_CLAMP_TO_EDGE;
 static bool gl_es = false;
 static bool gl_core_profile = false;
 
+extern "C" const char *gfx_opengl_get_glsl_version(void) {
+    return gl_glsl_version_str;
+}
+
 static int gfx_opengl_get_max_texture_size() {
     GLint max_texture_size;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);

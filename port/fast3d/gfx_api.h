@@ -8,6 +8,7 @@
 
 #include "gfx_rendering_api.h"
 #include "gfx_window_manager_api.h"
+#include "gfx_world_lighting_api.h"
 
 struct XYWidthHeight {
     int16_t x, y;
@@ -24,6 +25,12 @@ struct GfxInitSettings {
     struct GfxWindowManagerAPI *wapi;
     struct GfxRenderingAPI *rapi;
     struct GfxWindowInitSettings window_settings;
+};
+
+enum GfxRenderMode {
+    GFX_RENDER_ORIGINAL = 0,
+    GFX_RENDER_ENHANCED = 1,
+    GFX_RENDER_REMASTER = 2,
 };
 
 extern struct GfxDimensions gfx_current_window_dimensions; // The dimensions of the window
@@ -51,11 +58,19 @@ void gfx_set_wrap_fix(int on);
 void gfx_set_anisotropy_level(int level);  /* 1 = off; clamped to GL max */
 void gfx_set_safe_area_crop(int on);       /* crop the N64 TV-overscan safe-area margin instead of showing it as black bars */
 void gfx_set_dynamic_lighting(int on);     /* port-only camera point light */
+#ifdef __cplusplus
+extern "C" {
+#endif
+void gfx_set_render_mode(int mode);        /* original, enhanced, or remaster */
+int  gfx_get_render_mode(void);
 /* On-window pixel rect (top-left origin) the full VI logical canvas (0,0)-
  * (SCREEN_WIDTH, SCREEN_HEIGHT) currently maps to, honoring the safe-area
  * crop above -- for inverting a window mouse click into logical 2D UI space
  * (see port/src/optionsoverlay.c, D316). */
 void gfx_get_ui_screen_rect(int32_t *outX, int32_t *outY, int32_t *outW, int32_t *outH);
+#ifdef __cplusplus
+}
+#endif
 void gfx_texture_cache_clear(void);
 void gfx_texture_cache_delete(const uint8_t *orig_addr);
 void gfx_texture_cache_delete_range(const uint8_t *start, const uint8_t *end);

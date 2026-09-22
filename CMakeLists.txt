@@ -189,6 +189,21 @@ configure_file(
   "${CMAKE_SOURCE_DIR}/port/include/hoststdlib.h.in"
   "${CMAKE_BINARY_DIR}/port/include/hoststdlib.h" @ONLY)
 
+# Host <limits.h> path for port/shim/limits.h. The N64 include/limits.h only
+# defines LONG_MAX/ULONG_MAX for MIPS-specific macros, which is correct for
+# game code but insufficient for host libraries such as FreeType.
+execute_process(
+  COMMAND "${CMAKE_C_COMPILER}" -print-file-name=include/limits.h
+  OUTPUT_VARIABLE _PORT_GCC_LIMITS OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(_PORT_GCC_LIMITS AND EXISTS "${_PORT_GCC_LIMITS}")
+  get_filename_component(PORT_HOST_LIMITS_H "${_PORT_GCC_LIMITS}" ABSOLUTE)
+else()
+  get_filename_component(PORT_HOST_LIMITS_H "${_PORT_GCC_DIR}/../include/limits.h" ABSOLUTE)
+endif()
+configure_file(
+  "${CMAKE_SOURCE_DIR}/port/include/hostlimits.h.in"
+  "${CMAKE_BINARY_DIR}/port/include/hostlimits.h" @ONLY)
+
 # Host <stddef.h> path for port/shim/stddef.h (same reason as stdlib: the N64
 # stub shadows the host header in C++ TUs, hiding max_align_t from cstddef).
 # stddef.h is compiler-internal, not in bin/../include: on a native Linux GCC
@@ -349,13 +364,25 @@ include_directories(
 )
 
 # ----------------------------------------------------------------------------
-# Dependencies: SDL2, zlib, OpenGL
+# Dependencies: SDL2, zlib, OpenGL, optional FreeType vector UI
 # ----------------------------------------------------------------------------
 set(LIBS "")
 
 find_package(SDL2 REQUIRED)
 include_directories(SYSTEM "${SDL2_INCLUDE_DIR}")
 list(APPEND LIBS "${SDL2_LIBRARY}")
+
+# Libre Franklin is loaded at runtime from data/fonts when supplied by the
+# user/package. FreeType is optional so the port still builds on platforms
+# that only ship the original N64 bitmap UI; those builds use that fallback.
+find_package(Freetype QUIET)
+if(FREETYPE_FOUND)
+  include_directories(SYSTEM "${FREETYPE_INCLUDE_DIRS}")
+  list(APPEND LIBS "${FREETYPE_LIBRARIES}")
+  add_definitions(-DGE007_HAVE_FREETYPE=1)
+else()
+  message(STATUS "FreeType not found: vector UI will use the original bitmap font")
+endif()
 
 find_package(ZLIB REQUIRED)
 if(ZLIB_INCLUDE_DIR)
@@ -407,10 +434,13 @@ list(APPEND LIBS "${EXTRA_LIBRARIES}")
 # Sources
 # ----------------------------------------------------------------------------
 # Port layer (shims + software RSP).
-file(GLOB_RECURSE SRC_PORT      "${CMAKE_SOURCE_DIR}/port/src/*.c")
-file(GLOB_RECURSE SRC_PORT_CXX  "${CMAKE_SOURCE_DIR}/port/src/*.cpp")
-file(GLOB_RECURSE SRC_FAST3D    "${CMAKE_SOURCE_DIR}/port/fast3d/*.cpp"
-                               "${CMAKE_SOURCE_DIR}/port/fast3d/glad/*.c")
+file(GLOB_RECURSE SRC_PORT CONFIGURE_DEPENDS
+  "${CMAKE_SOURCE_DIR}/port/src/*.c")
+file(GLOB_RECURSE SRC_PORT_CXX CONFIGURE_DEPENDS
+  "${CMAKE_SOURCE_DIR}/port/src/*.cpp")
+file(GLOB_RECURSE SRC_FAST3D CONFIGURE_DEPENDS
+  "${CMAKE_SOURCE_DIR}/port/fast3d/*.cpp"
+  "${CMAKE_SOURCE_DIR}/port/fast3d/glad/*.c")
 
 # Generated absolute ROM asset symbols for this region (see
 # scripts/gen_romassets.py). Defines every obseg/ramrom/music label and the

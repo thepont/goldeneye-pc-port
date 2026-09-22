@@ -46,6 +46,7 @@
 #include "input.h"
 #include "optionsoverlay.h"
 #include "../fast3d/gfx_api.h"
+#include "../fast3d/vector_text.h"
 
 /* ---- game symbols (rendering/UI only; see input.c for the same pattern) ---- */
 struct font;
@@ -67,6 +68,7 @@ enum { ROW_TOGGLE, ROW_SLIDER, ROW_ENUM, ROW_MSAA, ROW_RES, ROW_ACTION, ROW_FPSC
 
 static const char *const kOnOff[]     = { "OFF", "ON", NULL };
 static const char *const kTexFilter[] = { "NEAREST", "BILINEAR", "3-POINT", NULL };
+static const char *const kRenderMode[] = { "ORIGINAL", "ENHANCED", "REMASTER", NULL };
 static const int         kMsaaSeq[]   = { 1, 2, 4, 8 };
 /* D186: the sim's own tick pacemaker is hardcoded to the console's native VI
  * rate (60Hz NTSC / 50Hz PAL, port/src/libultra.c) -- Video.FpsCap can only
@@ -122,10 +124,13 @@ static struct Row rows[] = {
     { "__Resolution",             "Resolution",       ROW_RES,    0,    NULL,       0, 0, 0,   0,0,0,0,0 },
     { "Video.VSync",              "VSync",            ROW_TOGGLE, 1,    kOnOff,     0, 0, 0,   0,0,0,0,0 },
     { "Video.FpsCap",             "Frame cap",        ROW_FPSCAP, 0,    NULL,       0, 0, 0,   0,0,0,0,0 },
+    { "Video.RenderMode",         "Render mode",       ROW_ENUM,   1,    kRenderMode, 0, 0, 0,   0,0,0,0,0 },
     { "Video.DynamicLighting",    "Dynamic lighting", ROW_TOGGLE, 1,    kOnOff,     0, 0, 0,   0,0,0,0,0 },
     { "Video.MSAA",               "MSAA",             ROW_MSAA,   0,    NULL,       1, 0, 0,   0,0,0,0,0 },
     { "Video.TextureFilter",      "Texture filter",   ROW_ENUM,   1,    kTexFilter, 0, 0, 0,   0,0,0,0,0 },
     { "Video.Anisotropy",         "Anisotropic",      ROW_SLIDER, 1,    NULL,       0, 0, 0,   0,0,0,0,0 },
+    { "Video.PostFX",             "Adaptive sharpen", ROW_TOGGLE, 1,    kOnOff,     0, 0, 0,   0,0,0,0,0 },
+    { "Video.Sharpen",            "Sharpness %",      ROW_SLIDER, 5,    NULL,       0, 0, 100,  0,0,0,0,0 },
     { "Video.FovScale",           "FOV scale %",      ROW_SLIDER, 5,    NULL,       0, 0, 0,   0,0,0,0,0 },
     { "Video.WidescreenAuto",     "Widescreen auto FOV",ROW_TOGGLE,1,   kOnOff,     0, 0, 0,   0,0,0,0,0 },
     { "Video.SafeAreaCrop",       "Crop overscan bars", ROW_TOGGLE,1,   kOnOff,     0, 0, 0,   0,0,0,0,0 },
@@ -861,6 +866,10 @@ static void valueText(const struct Row *r, char *out, int n)
 
 static Gfx *drawText(Gfx *gdl, s32 x, s32 y, const char *str, u32 colour)
 {
+    if (gfx_vector_text_enabled() &&
+        gfx_vector_text_queue(x, y, str, colour)) {
+        return gdl;
+    }
     s32 px = x, py = y;
     /* width/height are the on-screen CLIP rect textRenderGlyph tests against
      * (clipX=start x, clipY=start y, +clipWidth/+clipHeight), NOT the text's
@@ -873,6 +882,9 @@ static Gfx *drawText(Gfx *gdl, s32 x, s32 y, const char *str, u32 colour)
 
 static s32 measureText(const char *str)
 {
+    if (gfx_vector_text_enabled()) {
+        return gfx_vector_text_measure(str);
+    }
     s32 h = 0, w = 0;
     textMeasure(&h, &w, (char *)str, ptrFontBankGothicChars, ptrFontBankGothic, 0);
     return w;
