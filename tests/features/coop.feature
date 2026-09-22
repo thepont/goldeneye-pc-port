@@ -19,6 +19,11 @@ Feature: PC co-op and multiplayer session lifecycle
     Then both players reach the stage at distinct positions
     And the top and bottom viewports are active
 
+  Scenario: Aim with the right mouse button
+    Given one fake controller
+    When Dam is launched with the aim binding held
+    Then the sight is drawn while aiming
+
   Scenario: Resume solo
     Given one fake controller
     When a solo session is resumed at Dam

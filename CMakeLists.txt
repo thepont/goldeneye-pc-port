@@ -608,6 +608,36 @@ if(BUILD_TESTING)
   add_test(NAME ge007_fake_controller
            COMMAND ge007_fake_controller_test)
 
+  add_executable(ge007_controller_mapping_test
+    tests/controller_mapping_test.cpp
+    port/src/controller_mapping.c)
+  target_include_directories(ge007_controller_mapping_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  add_test(NAME ge007_controller_mapping
+           COMMAND ge007_controller_mapping_test)
+
+  add_executable(ge007_input_mapping_test
+    tests/input_mapping_test.cpp
+    port/src/input_harness.c)
+  target_include_directories(ge007_input_mapping_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  add_test(NAME ge007_input_mapping
+           COMMAND ge007_input_mapping_test)
+
+  add_executable(ge007_sight_policy_test
+    tests/sight_policy_test.cpp)
+  target_include_directories(ge007_sight_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  add_test(NAME ge007_sight_policy
+           COMMAND ge007_sight_policy_test)
+
+  add_executable(ge007_viewport_policy_test
+    tests/viewport_policy_test.cpp)
+  target_include_directories(ge007_viewport_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  add_test(NAME ge007_viewport_policy
+           COMMAND ge007_viewport_policy_test)
+
   add_test(NAME ge007_pc_bdd
            COMMAND bash "${CMAKE_SOURCE_DIR}/tests/run_pc_bdd.sh")
   set_tests_properties(ge007_pc_bdd

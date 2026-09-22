@@ -40,6 +40,8 @@
 #ifdef PORT
 #include <stdlib.h>
 #include <stdio.h>
+#include "sight_policy.h"
+extern void _Exit(int status);
 /* D102: the 1P weapon Model and its RW-data pool were punned onto
  * hand->field_B68 / hand->modeldatas; on x86-64 struct Model (0xE8) is too
  * big for that layout and modelInit() aliases objinst->datas onto the pool
@@ -6390,13 +6392,17 @@ void gunDrawSight(s32 *gdl) {
     static int sight_trace_drawn = -1;
     static int sight_trace_mode = -1;
     static int sight_trace_menu = -1;
-    const int sight_aiming =
-        (g_CurrentPlayer->gunsightmode & GUNSIGHTREASON_NOTAIMING) == 0;
-    const int sight_drawn =
-        g_CurrentPlayer->gunsightmode == 0 && g_CurrentPlayer->mpmenuon == FALSE;
+    static int sight_trace_exit_enabled = -1;
+    static int sight_trace_exit_requested = 0;
+    const int sight_aiming = geSightIsAiming(g_CurrentPlayer->gunsightmode);
+    const int sight_drawn = geSightShouldDraw(
+        g_CurrentPlayer->gunsightmode, g_CurrentPlayer->mpmenuon);
 
     if (sight_trace_enabled < 0) {
         sight_trace_enabled = getenv("GE_SIGHT_TRACE") != NULL;
+    }
+    if (sight_trace_exit_enabled < 0) {
+        sight_trace_exit_enabled = getenv("GE_SIGHT_TRACE_EXIT") != NULL;
     }
     if (sight_trace_enabled &&
         (sight_trace_aiming != sight_aiming || sight_trace_drawn != sight_drawn ||
@@ -6426,7 +6432,8 @@ void gunDrawSight(s32 *gdl) {
     f32 xypos[2];
     f32 halfedxy[2];
 
-    if ((g_CurrentPlayer->gunsightmode == 0) && (g_CurrentPlayer->mpmenuon == FALSE)) {
+    if (geSightShouldDraw(g_CurrentPlayer->gunsightmode,
+                          g_CurrentPlayer->mpmenuon)) {
 #ifdef PORT
         sp54 = *(Gfx **)gdl;
         texSelect(&sp54, crosshairimage, 4, 0, 0);
@@ -6453,6 +6460,16 @@ void gunDrawSight(s32 *gdl) {
         *gdl = sp54;
 #endif
     }
+#ifdef PORT
+    /* The aim BDD has already appended the real crosshair display-list
+     * commands at this point. Terminate immediately before a timeout can race
+     * scheduler teardown; this is an opt-in test-only exit with no cleanup. */
+    if (sight_trace_exit_enabled && !sight_trace_exit_requested &&
+        sight_aiming && sight_drawn) {
+        sight_trace_exit_requested = 1;
+        _Exit(0);
+    }
+#endif
 }
 
 

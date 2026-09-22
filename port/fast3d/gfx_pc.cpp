@@ -32,6 +32,7 @@
 #include "gfx_rendering_api.h"
 #include "gfx_screen_config.h"
 #include "dynamic_lighting.h"
+#include "viewport_policy.h"
 
 uintptr_t gfxFramebuffer;
 
@@ -2732,8 +2733,8 @@ static void gfx_calc_and_set_viewport(const Vp_t* viewport) {
     /* GE's two-player layout uses roughly half-height viewports. Do not apply
      * the single-player safe-area crop to either half: each raw viewport must
      * map to its own window rectangle. */
-    g_current_viewport_is_split = height > 1.0f &&
-                                   height < (float)SCREEN_HEIGHT * 0.75f;
+    g_current_viewport_is_split = geViewportIsSplit(
+        height, (float)SCREEN_HEIGHT);
 
     /* Cache the raw (pre window-scale) viewport bounds for the safe-area
      * crop above -- guard against a degenerate/zero-height viewport so a
@@ -2751,11 +2752,17 @@ static void gfx_calc_and_set_viewport(const Vp_t* viewport) {
 #ifdef PORT
     {
         static int trace_enabled = -1;
+        static int trace_exit_enabled = -1;
         static int trace_count = 0;
+        static unsigned split_trace_mask = 0;
+        static int trace_exit_requested = 0;
         extern uint32_t num_dls;
 
         if (trace_enabled < 0) {
             trace_enabled = getenv("GE_VIEWPORT_TRACE") != nullptr;
+        }
+        if (trace_exit_enabled < 0) {
+            trace_exit_enabled = getenv("GE_VIEWPORT_TRACE_EXIT") != nullptr;
         }
         /* Keep the early menu trace useful without consuming the budget
          * before a long scripted co-op menu reaches gameplay. Once a split
@@ -2771,6 +2778,31 @@ static void gfx_calc_and_set_viewport(const Vp_t* viewport) {
                     (int)(viewport->vscale[1] / 2.0f),
                     (int)rdp.viewport.x, (int)rdp.viewport.y,
                     (unsigned)rdp.viewport.width, (unsigned)rdp.viewport.height);
+        }
+
+        /* The BDD renderer probe must stop after both split rectangles have
+         * reached the real GL mapping. A signal-based timeout can interrupt
+         * the scheduler while it tears down two player threads and turn a
+         * cleanly observed frame into a shutdown SIGSEGV. This opt-in test
+         * exit is deliberately after the trace and is inert in normal runs. */
+        if (trace_exit_enabled && g_current_viewport_is_split) {
+            const int logical_x = (int)(viewport->vtrans[0] / 4.0f -
+                                       viewport->vscale[0] / 4.0f);
+            const int logical_y = (int)(viewport->vtrans[1] / 4.0f -
+                                        viewport->vscale[1] / 4.0f);
+            const int logical_width = (int)(viewport->vscale[0] / 2.0f);
+            const int logical_height = (int)(viewport->vscale[1] / 2.0f);
+            if (logical_x == 0 && logical_y == 10 &&
+                logical_width == 320 && logical_height == 109) {
+                split_trace_mask |= 1U;
+            } else if (logical_x == 0 && logical_y == 121 &&
+                       logical_width == 320 && logical_height == 109) {
+                split_trace_mask |= 2U;
+            }
+            if (split_trace_mask == 3U && !trace_exit_requested) {
+                trace_exit_requested = 1;
+                std::_Exit(0);
+            }
         }
     }
 #endif

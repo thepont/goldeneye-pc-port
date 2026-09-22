@@ -106,6 +106,11 @@ assert_sight_drawn_while_aiming() {
     local name="$1"
     local log="$2"
 
+    if ! rg -q -e 'GE_INPUTLOG cont0: btn=0010' "${log}"; then
+        echo "FAIL: ${name} did not route the aim binding to the N64 R trigger"
+        rg -n 'GE_INPUTLOG cont0|GE_SIGHT_TRACE' "${log}" || true
+        exit 1
+    fi
     if ! rg -q -e 'GE_SIGHT_TRACE:.*aiming=1.*drawn=1' "${log}"; then
         echo "FAIL: ${name} did not draw the reticle while the aim button was held"
         rg -n 'GE_SIGHT_TRACE|GE_INPUTLOG cont0' "${log}" || true
@@ -160,10 +165,16 @@ common_timeout=(timeout 60s "${BINARY}")
 # Rendering probes intentionally stay alive long enough to submit real display
 # lists. A timeout is an expected harness boundary here; assertions below must
 # still prove that both renderer rectangles were observed and non-overlapping.
+# The split renderer probes opt into a clean exit immediately after both
+# rectangles reach the real GL mapping; the other render probe remains bounded
+# by a timeout while its own trace assertion runs.
 render_probe=(bash -c 'timeout -k 2s 8s "$@"; status=$?; if [[ "${status}" -eq 124 || "${status}" -eq 137 ]]; then exit 0; fi; exit "${status}"' ge007-render "${BINARY}")
 menu_render_probe=(bash -c 'timeout -k 2s 35s "$@"; status=$?; if [[ "${status}" -eq 124 || "${status}" -eq 137 ]]; then exit 0; fi; exit "${status}"' ge007-menu-render "${BINARY}")
 coop_menu_script='60:SDOWN;120:SNONE,A;240:A;400:A;560:A;720:A;880:A;1040:A;1200:A;1360:A;1520:A'
-aim_hold_script='0:R;6:R;12:R;18:R;24:R;30:R;36:R;42:R;48:R;54:R;60:R;66:R;72:R;78:R;84:R;90:R;96:R;102:R;108:R;114:R;120:R;126:R;132:R;138:R;144:R;150:R;156:R;162:R;168:R;174:R;180:R;186:R;192:R;198:R;204:R;210:R;216:R;222:R;228:R;234:R;240:R'
+# Pulses leave a release edge between presses. That makes the harness exercise
+# the same RMB hold/edge transition used to leave the stage intro, while still
+# proving that gameplay draws the reticle with the aim trigger active.
+aim_hold_script='0:R;12:R;24:R;36:R;48:R;60:R;72:R;84:R;96:R;108:R;120:R;132:R;144:R;156:R;168:R;180:R;192:R;204:R;216:R;228:R;240:R;252:R;264:R;276:R;288:R;300:R;312:R;324:R;336:R;348:R;360:R;372:R;384:R;396:R;408:R;420:R;432:R;444:R;456:R;468:R;480:R;492:R;504:R;516:R;528:R;540:R;552:R;564:R;576:R;588:R;600:R;612:R;624:R;636:R;648:R;660:R;672:R;684:R;696:R;708:R;720:R;732:R;744:R;756:R'
 run_case solo_launch \
     'STAGE_SMOKE: mode=0 stage=33 players=1 viewports=1' \
     'STAGE_PLAYER: player=0' \
@@ -184,6 +195,7 @@ run_case multiplayer_launch \
     GE_STAGE_SMOKE=1 \
     GE_VIEWPORT_SMOKE=1 \
     GE_VIEWPORT_TRACE=1 \
+    GE_VIEWPORT_TRACE_EXIT=1 \
     "${render_probe[@]}" -level_38
 assert_distinct_positions multiplayer_launch "${TMP_DIR}/multiplayer_launch.log"
 assert_split_render_viewports multiplayer_launch "${TMP_DIR}/multiplayer_launch.log"
@@ -194,7 +206,9 @@ run_case aim_reticle \
     GE_FAKE_CONTROLLERS=1 \
     GE_RESUME_MODE=solo \
     GE_INPUTSCRIPT="${aim_hold_script}" \
+    GE_INPUTLOG=1 \
     GE_SIGHT_TRACE=1 \
+    GE_SIGHT_TRACE_EXIT=1 \
     GE_STAGE_SMOKE=1 \
     "${render_probe[@]}" -level_33
 assert_sight_drawn_while_aiming aim_reticle "${TMP_DIR}/aim_reticle.log"
@@ -218,6 +232,7 @@ run_case coop_menu \
     GE_COOP_SPAWN_LOG=1 \
     GE_VIEWPORT_SMOKE=1 \
     GE_VIEWPORT_TRACE=1 \
+    GE_VIEWPORT_TRACE_EXIT=1 \
     "${menu_render_probe[@]}"
 assert_distinct_positions coop_menu "${TMP_DIR}/coop_menu.log"
 assert_split_render_viewports coop_menu "${TMP_DIR}/coop_menu.log"
@@ -243,6 +258,7 @@ run_case resume_coop_two \
     GE_COOP_SPAWN_LOG=1 \
     GE_VIEWPORT_SMOKE=1 \
     GE_VIEWPORT_TRACE=1 \
+    GE_VIEWPORT_TRACE_EXIT=1 \
     "${render_probe[@]}" -level_33
 assert_distinct_positions resume_coop_two "${TMP_DIR}/resume_coop_two.log"
 assert_split_render_viewports resume_coop_two "${TMP_DIR}/resume_coop_two.log"

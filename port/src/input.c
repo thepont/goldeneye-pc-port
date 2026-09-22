@@ -37,8 +37,7 @@
  *   left trigger ...... R trigger      (aim mode)
  *   A / X ............. A button
  *   B / Y ............. B button
- *   LB ............... L trigger
- *   RB ............... B button        (reload)
+ *   LB / RB .......... weapon-cycle edges (previous / next)
  *   D-pad ............ N64 D-pad
  *   Start ............ Start
  *
@@ -80,6 +79,7 @@
 #include "config.h"
 #include "input.h"
 #include "input_harness.h"
+#include "controller_mapping.h"
 #include "optionsoverlay.h"
 /* D194 absolute aim: read-only access to the live camera (struct player).
  * Game header pulled in through the same shim path every other compiled game
@@ -89,23 +89,6 @@
 /* D194 spazz diagnosis: game ticks batched into the current poll (lv.h).
  * Read-only; declared locally to avoid pulling lv.h's wider dependency set. */
 extern s32 g_ClockTimer;
-
-/* N64 button bits (from PR/os.h -- duplicated here to avoid pulling os.h,
- * whose `u8 errno;` field collides with <errno.h>'s macro). */
-#define GE_CONT_A      0x8000
-#define GE_CONT_B      0x4000
-#define GE_CONT_G      0x2000  /* Z trigger */
-#define GE_CONT_START  0x1000
-#define GE_CONT_UP     0x0800
-#define GE_CONT_DOWN   0x0400
-#define GE_CONT_LEFT   0x0200
-#define GE_CONT_RIGHT  0x0100
-#define GE_CONT_L      0x0020
-#define GE_CONT_R      0x0010
-#define GE_CONT_E      0x0008  /* C-up    */
-#define GE_CONT_D      0x0004  /* C-down  */
-#define GE_CONT_C      0x0002  /* C-left  */
-#define GE_CONT_F      0x0001  /* C-right */
 
 #define MAX_PADS            4
 #define STICK_DEADZONE      7000
@@ -370,7 +353,6 @@ static int s_centreClearTicks = 0;
  * with it pinned to 0 they take exactly the pre-D194 paths. */
 static int    s_absAimSuspend = 0;
 
-static int aimAbsCompute(double dxPx, double dyPx, int *outSx, int *outSy);  /* D194 */
 static int naturalPitchMode = 1;    /* D194/D238: 1 = force GE's own 1.2/SOLITARE
                                       * control style for continuous analog pitch;
                                       * 0 = legacy 1.1/HONEY + D166 digital pulse. */
@@ -660,21 +642,6 @@ void inputUpdate(void)
     mouseDY += dy;
 }
 
-static int scaleAxis(int v)
-{
-    int dz = padDeadzone;
-    if (dz < 0) dz = 0;
-    if (dz > 30000) dz = 30000;
-    if (v > -dz && v < dz) {
-        return 0;
-    }
-    if (v < 0) v += dz; else v -= dz;
-    int out = (int)((long)v * STICK_MAX / (32767 - dz));
-    if (out >  STICK_MAX) out =  STICK_MAX;
-    if (out < -STICK_MAX) out = -STICK_MAX;
-    return out;
-}
-
 static int keyDown(const Uint8 *ks, SDL_Scancode sc)
 {
     return ks && sc != SDL_SCANCODE_UNKNOWN && ks[sc];
@@ -796,11 +763,17 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
     if (idx == 0) {
         const Uint8 *ks = SDL_GetKeyboardState(NULL);
         Uint32 mb = mouseEnabled ? SDL_GetMouseState(NULL, NULL) : 0;
+        unsigned mouseButtons = 0;
+        if (mb & SDL_BUTTON(SDL_BUTTON_LEFT))
+            mouseButtons |= GE_INPUT_MOUSE_LEFT;
+        if (mb & SDL_BUTTON(SDL_BUTTON_RIGHT))
+            mouseButtons |= GE_INPUT_MOUSE_RIGHT;
         int menuMode = (current_menu != GE_MENU_RUN_STAGE &&
                         current_menu != GE_MENU_INVALID);
 
         /* D194: aim mode drives the view from GRABBED relative deltas (see
-         * aimAbsCompute) -- the cursor stays hidden and clipped to the window
+         * the aim-mode mapping below) -- the cursor stays hidden and clipped
+         * to the window
          * for the whole hold. The earlier free-cursor experiment (suspend the
          * grab, read absolute position) is reverted: the visible cursor could
          * leave the window and OS micro-jitter read as view jitter.
@@ -817,14 +790,10 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
          * open (early return above), so it only fires once it has closed. */
         applyCursorVisibility();
 
-        /* Click-to-lock, in a stage, cursor free: the mouse buttons must not
-         * reach the game (no phantom fire) -- the first click only re-locks
-         * (handled in video.c -> inputNotifyClick). Menus keep their buttons. */
-        /* ...but not while an aim hold has the cursor out for absolute aim:
-         * then the buttons are intentional (RMB is the hold itself, LMB fires). */
-        if (!mouseGrabbed && !menuMode && !s_absAimSuspend) {
-            mb = 0;
-        }
+        /* Click-to-lock and menu semantics live in one pure port boundary so
+         * the physical RMB -> R-trigger contract is unit-tested. */
+        int mouseAimHeld = (mouseButtons & GE_INPUT_MOUSE_RIGHT) != 0 &&
+                           (mouseGrabbed || menuMode || s_absAimSuspend);
 
         /* GE default control (1.1): stick Y = move fwd/back, stick X = turn,
          * C-left/right = sidestep, C-up/down = look. FPS layout: W/S move,
@@ -847,9 +816,9 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
         if (actHeld(ks, IA_TURN_L))   sx = -STICK_MAX;       /* keyboard turn */
         if (actHeld(ks, IA_TURN_R))   sx =  STICK_MAX;
 
-        if ((mb & SDL_BUTTON(SDL_BUTTON_LEFT)) || actHeld(ks, IA_FIRE))
+        if (actHeld(ks, IA_FIRE))
             button |= GE_CONT_G;
-        int aimHeld = (mb & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0 ||
+        int aimHeld = mouseAimHeld ||
                       actHeld(ks, IA_AIM);
         int aimRisingEdgeAim = aimHeld && !s_aimHeldPrev;
         if (aimRisingEdgeAim && g_CurrentPlayer && g_CurrentPlayer->docentreupdown)
@@ -870,7 +839,7 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
             sysLogPrintf(LOG_NOTE,
                 "GE_INPUTLOG absaim centre-spring armed at aim entry; nudging to clear");
         }
-        if (aimHeld)
+        if (aimHeld && !menuMode)
             button |= GE_CONT_R;
         if (actHeld(ks, IA_ACTION))
             button |= GE_CONT_A;
@@ -1114,12 +1083,8 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
             }
         }
 
-        if (menuMode && mouseEnabled) {
-            /* Clicks are select / back in the front end, not fire / aim. */
-            button &= ~(GE_CONT_G | GE_CONT_R);
-            if (mb & SDL_BUTTON(SDL_BUTTON_LEFT))  button |= GE_CONT_A;
-            if (mb & SDL_BUTTON(SDL_BUTTON_RIGHT)) button |= GE_CONT_B;
-        }
+        button = geInputApplyMouseButtons(
+            button, mouseButtons, mouseGrabbed, menuMode, s_absAimSuspend);
         menuPrevActive = menuMode;
 
         mouseDX = 0.0;
@@ -1148,8 +1113,8 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
                            current_menu != GE_MENU_INVALID);
 
         if (padMenuMode) {
-            int px = scaleAxis(lx);
-            int py = -scaleAxis(ly);       /* SDL up = negative -> N64 up = positive */
+            int px = geControllerScaleAxis(lx, padDeadzone, STICK_MAX);
+            int py = -geControllerScaleAxis(ly, padDeadzone, STICK_MAX);       /* SDL up = negative -> N64 up = positive */
             if (px) sx = px;
             if (py) sy = py;
         } else if (naturalPitchMode) {
@@ -1158,34 +1123,30 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
              * the keyboard remap above), right stick becomes continuous
              * natural look (replacing its old digital-C-button emulation),
              * matching how the mouse now drives look continuously too. */
-            if (ly < -RSTICK_THRESHOLD) button |= GE_CONT_E;   /* stick up = forward */
-            if (ly >  RSTICK_THRESHOLD) button |= GE_CONT_D;   /* stick down = back  */
-            if (lx < -RSTICK_THRESHOLD) button |= GE_CONT_C;   /* strafe left        */
-            if (lx >  RSTICK_THRESHOLD) button |= GE_CONT_F;   /* strafe right       */
+            if (geControllerAxisPastThreshold(ly, RSTICK_THRESHOLD, 0)) button |= GE_CONT_E;   /* stick up = forward */
+            if (geControllerAxisPastThreshold(ly, RSTICK_THRESHOLD, 1)) button |= GE_CONT_D;   /* stick down = back  */
+            if (geControllerAxisPastThreshold(lx, RSTICK_THRESHOLD, 0)) button |= GE_CONT_C;   /* strafe left        */
+            if (geControllerAxisPastThreshold(lx, RSTICK_THRESHOLD, 1)) button |= GE_CONT_F;   /* strafe right       */
 
-            int rxs = scaleAxis(rx);
-            int rys = -scaleAxis(ry);   /* SDL up = negative -> N64 up = positive */
+            int rxs = geControllerScaleAxis(rx, padDeadzone, STICK_MAX);
+            int rys = -geControllerScaleAxis(ry, padDeadzone, STICK_MAX);   /* SDL up = negative -> N64 up = positive */
             if (padLookInvertY) rys = -rys;
             if (rxs) sx = rxs;
             if (rys) sy = rys;
         } else {
-            int px = scaleAxis(lx);
-            int py = -scaleAxis(ly);       /* SDL up = negative -> N64 up = positive */
+            int px = geControllerScaleAxis(lx, padDeadzone, STICK_MAX);
+            int py = -geControllerScaleAxis(ly, padDeadzone, STICK_MAX);       /* SDL up = negative -> N64 up = positive */
             if (px) sx = px;
             if (py) sy = py;
 
             if (padLookInvertY) ry = -ry;
-            if (rx >  RSTICK_THRESHOLD) button |= GE_CONT_F;
-            if (rx < -RSTICK_THRESHOLD) button |= GE_CONT_C;
-            if (ry >  RSTICK_THRESHOLD) button |= GE_CONT_D;
-            if (ry < -RSTICK_THRESHOLD) button |= GE_CONT_E;
+            if (geControllerAxisPastThreshold(rx, RSTICK_THRESHOLD, 1)) button |= GE_CONT_F;
+            if (geControllerAxisPastThreshold(rx, RSTICK_THRESHOLD, 0)) button |= GE_CONT_C;
+            if (geControllerAxisPastThreshold(ry, RSTICK_THRESHOLD, 1)) button |= GE_CONT_D;
+            if (geControllerAxisPastThreshold(ry, RSTICK_THRESHOLD, 0)) button |= GE_CONT_E;
         }
 
         int trigPt = padTriggerPct * 327;   /* % of the 0..32767 trigger travel */
-        if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > trigPt)
-            button |= GE_CONT_G;
-        if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > trigPt)
-            button |= GE_CONT_R;
 
         /* Modern dual-stick layout (Xbox re-release style; the Steam Deck
          * target). A/X = action/use/reload (the game's context-sensitive A
@@ -1194,34 +1155,33 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
          * (backward -- bondview2.c weaponForwardOffset/weaponBackOffset, the
          * same trick the mouse wheel uses above); emit for exactly one poll
          * so holding RB cannot latch invButtons and block firing. */
-        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) ||
-            SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X))
-            button |= GE_CONT_A;
-        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B) ||
-            SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y))
-            button |= GE_CONT_B;
         {
             int lbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
             int rbNow = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
             int *prev = &padShoulderPrev[idx];
+            GeControllerDigitalState padButtons = {
+                SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A),
+                SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X),
+                SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B),
+                SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y),
+                geControllerTriggerIsActive(
+                    SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT), trigPt),
+                geControllerTriggerIsActive(
+                    SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT), trigPt),
+                lbNow && !(*prev & 2),
+                rbNow && !(*prev & 1),
+                SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START),
+                SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP),
+                SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN),
+                SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT),
+                SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT),
+            };
+
             /* Track edge state in menus too: a shoulder held across the
              * menu->game transition must not fire a cycle on entry. */
-            if (!padMenuMode) {
-                if (rbNow && !(*prev & 1)) button |= GE_CONT_A;            /* next weapon */
-                if (lbNow && !(*prev & 2)) button |= GE_CONT_A | GE_CONT_G; /* prev weapon */
-            }
+            button |= geControllerMapDigitalButtons(padButtons, padMenuMode);
             *prev = (rbNow ? 1 : 0) | (lbNow ? 2 : 0);
         }
-        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START))
-            button |= GE_CONT_START;
-        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP))
-            button |= GE_CONT_UP;
-        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN))
-            button |= GE_CONT_DOWN;
-        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT))
-            button |= GE_CONT_LEFT;
-        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT))
-            button |= GE_CONT_RIGHT;
 
         /* Select (BACK) opens the F10 options overlay -- the gamepad
          * equivalent of the F10 key for controller-only machines (Steam
