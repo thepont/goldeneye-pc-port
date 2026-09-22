@@ -96,6 +96,19 @@ by default (F10 → *All unlocked* opens every level, 007 mode and the full
 cheat menu); F10 in-game options overlay (resolution, frame cap, MSAA,
 filtering, FOV, sensitivity); Windows and Linux, including Steam Deck.
 
+### Experimental co-op split screen
+
+The `feature/coop` branch adds two-player co-op with independent spawn
+positions and vertically separated, non-overlapping viewports. This is a live
+Dam capture from the PC renderer:
+
+<p align="center">
+  <img src="docs/img/coop-split-screen.png" width="100%"
+       alt="Two-player co-op split-screen gameplay on Dam">
+  <br><em>Experimental two-player co-op on Dam, with a separate viewpoint for
+  each player.</em>
+</p>
+
 **Known issues:**
 
 - Particle colours: a real fix landed (a corrupted-vertex-buffer bug), but
@@ -194,9 +207,10 @@ directionally, on the way to v1.0:
 - General polish: performance, remaining rendering/audio defects, save/config
   robustness.
 
-Not currently planned: new game modes GE never shipped (e.g. co-op), online (non-LAN)
-multiplayer, ray tracing. If any of these matter to you, open an issue —
-it helps prioritize.
+The experimental co-op implementation shown above is limited to
+`feature/coop` and is not part of the v0.3.0 release. Online (non-LAN)
+multiplayer and ray tracing are not currently planned. If either matters to
+you, open an issue — it helps prioritize.
 
 ## Beyond playing
 
