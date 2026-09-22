@@ -305,6 +305,14 @@ int main()
         return 1;
     }
 
+    if (!near(geVectorTextLogicalPixelOffset(640.0f, 640), 1.0f) ||
+        !near(geVectorTextLogicalPixelOffset(640.0f, 1280), 0.5f) ||
+        !near(geVectorTextLogicalPixelOffset(640.0f, 0), 0.0f) ||
+        !near(geVectorTextLogicalPixelOffset(0.0f, 640), 0.0f)) {
+        std::fprintf(stderr, "vector text outline pixel mapping failed\n");
+        return 1;
+    }
+
     if (gePostFxClampSharpen(-1) != 0 ||
         gePostFxClampSharpen(35) != 35 ||
         gePostFxClampSharpen(101) != 100 ||

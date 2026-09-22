@@ -39,6 +39,8 @@ struct VectorTextCommand {
     int x;
     int y;
     uint32_t colour;
+    uint32_t outline_colour;
+    bool outlined;
     char text[kMaxTextLength + 1];
 };
 
@@ -98,6 +100,8 @@ static bool loadFaceFromCandidates()
     const char *environment_path = std::getenv("GE_UI_FONT");
     const char *candidates[] = {
         environment_path,
+        "data/fonts/ScienceGothic[CTRS,slnt,wdth,wght].ttf",
+        "data/fonts/ScienceGothic-Variable.ttf",
         "data/fonts/LibreFranklin-Regular.ttf",
         "data/fonts/LibreFranklin-SemiBold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
@@ -438,7 +442,29 @@ extern "C" int gfx_vector_text_measure(const char *text)
 #endif
 }
 
-extern "C" int gfx_vector_text_queue(int x, int y, const char *text, uint32_t colour)
+extern "C" int gfx_vector_text_hud_width(const char *text, int fallback_width)
+{
+    if (!gfx_vector_text_enabled() || text == nullptr) {
+        return fallback_width;
+    }
+    const int width = gfx_vector_text_measure(text);
+    return width > 0 || text[0] == '\0' ? width : fallback_width;
+}
+
+extern "C" int gfx_vector_text_hud_height(int fallback_height)
+{
+    if (!gfx_vector_text_enabled()) {
+        return fallback_height;
+    }
+#ifdef GE007_HAVE_FREETYPE
+    return std::max(1, (int)std::ceil(g_face_line_height));
+#else
+    return fallback_height;
+#endif
+}
+
+static int queueTextCommand(int x, int y, const char *text, uint32_t colour,
+                            uint32_t outline_colour, bool outlined)
 {
     if (!gfx_vector_text_enabled() || text == nullptr ||
         g_command_count >= g_commands.size()) {
@@ -449,9 +475,33 @@ extern "C" int gfx_vector_text_queue(int x, int y, const char *text, uint32_t co
     command.x = x;
     command.y = y;
     command.colour = colour;
+    command.outline_colour = outline_colour;
+    command.outlined = outlined;
     std::strncpy(command.text, text, kMaxTextLength);
     command.text[kMaxTextLength] = '\0';
     return 1;
+}
+
+extern "C" int gfx_vector_text_queue(int x, int y, const char *text, uint32_t colour)
+{
+    return queueTextCommand(x, y, text, colour, 0, false);
+}
+
+extern "C" int gfx_vector_text_queue_outlined(int x, int y, const char *text,
+                                                uint32_t colour,
+                                                uint32_t outline_colour)
+{
+    return queueTextCommand(x, y, text, colour, outline_colour, true);
+}
+
+extern "C" int gfx_vector_text_queue_hud(int x, int y, const char *text,
+                                           int outlined)
+{
+    if (outlined) {
+        return gfx_vector_text_queue_outlined(
+            x, y, text, 0xFFFFFFFFu, 0x646464FFu);
+    }
+    return gfx_vector_text_queue(x, y, text, 0xFF00B0FFu);
 }
 
 #ifdef GE007_HAVE_FREETYPE
@@ -533,13 +583,32 @@ extern "C" void gfx_vector_text_draw(void)
     const float logical_height = (float)gfx_current_native_viewport.height;
 
     g_vertices.clear();
-    g_vertices.reserve(g_command_count * 256);
+    g_vertices.reserve(g_command_count * 1024);
+    const float outline_x = geVectorTextLogicalPixelOffset(
+        logical_width, screen.width);
+    const float outline_y = geVectorTextLogicalPixelOffset(
+        logical_height, screen.height);
     for (std::size_t command_index = 0; command_index < g_command_count;
          ++command_index) {
         const VectorTextCommand &command = g_commands[command_index];
         visitTextLayout(command.text, (float)command.x, (float)command.y,
-            [&command, &screen, logical_width, logical_height]
+            [&command, &screen, logical_width, logical_height, outline_x, outline_y]
             (const VectorGlyph &glyph, float glyph_x, float glyph_y, float) {
+                if (command.outlined) {
+                    for (int offset_x = -1; offset_x <= 1; ++offset_x) {
+                        for (int offset_y = -1; offset_y <= 1; ++offset_y) {
+                            if (offset_x == 0 && offset_y == 0) {
+                                continue;
+                            }
+                            appendGlyphQuad(
+                                glyph,
+                                glyph_x + (float)offset_x * outline_x,
+                                glyph_y + (float)offset_y * outline_y,
+                                command.outline_colour,
+                                screen, logical_width, logical_height);
+                        }
+                    }
+                }
                 appendGlyphQuad(glyph, glyph_x, glyph_y, command.colour,
                                 screen, logical_width, logical_height);
             },

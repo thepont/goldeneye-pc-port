@@ -13,7 +13,12 @@ extern "C" {
 void gfx_vector_text_begin_frame(void);
 int gfx_vector_text_enabled(void);
 int gfx_vector_text_measure(const char *text);
+int gfx_vector_text_hud_width(const char *text, int fallback_width);
+int gfx_vector_text_hud_height(int fallback_height);
 int gfx_vector_text_queue(int x, int y, const char *text, uint32_t colour);
+int gfx_vector_text_queue_outlined(int x, int y, const char *text,
+                                   uint32_t colour, uint32_t outline_colour);
+int gfx_vector_text_queue_hud(int x, int y, const char *text, int outlined);
 void gfx_vector_text_draw(void);
 
 #ifdef __cplusplus

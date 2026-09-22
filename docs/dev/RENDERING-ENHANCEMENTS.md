@@ -46,17 +46,27 @@ the window scale changes; it is not a single 13-pixel bitmap stretched
 forever. Glyph bounds are snapped to output pixels and the atlas uses nearest
 sampling so FreeType's coverage values are not blurred by a second
 magnification pass.
+For the Bank Gothic role used by the watch and both ammo readouts, Science
+Gothic is the preferred outline-compatible replacement. It is a libre font
+with an OFL license and is based on the same geometric display-font tradition.
 The lookup order is:
 
 1. `GE_UI_FONT`, when set;
-2. `data/fonts/LibreFranklin-Regular.ttf`;
-3. `data/fonts/LibreFranklin-SemiBold.ttf`;
-4. the platform's Liberation Sans or Arial fallback.
+2. `data/fonts/ScienceGothic[CTRS,slnt,wdth,wght].ttf`;
+3. `data/fonts/ScienceGothic-Variable.ttf`;
+4. `data/fonts/LibreFranklin-Regular.ttf`;
+5. `data/fonts/LibreFranklin-SemiBold.ttf`;
+6. the platform's Liberation Sans or Arial fallback.
 
-Libre Franklin is not bundled with the repository. Install a licensed font
-file at one of the documented paths, or point `GE_UI_FONT` at an installed
-font. If FreeType, the font, or the OpenGL shader setup is unavailable, the
-original bitmap font is used automatically.
+The font files are not bundled with the repository. Install the official
+Science Gothic variable font at the documented path, or point `GE_UI_FONT` at
+an installed font. If FreeType, the font, or the OpenGL shader setup is
+unavailable, the original bitmap font is used automatically.
+
+The gameplay ammo, watch ammo, and bottom HUD message functions share one
+routing seam. In enhanced mode that seam uses the same vector face and
+preserves the original eight-way outline; it does not maintain a second
+ammo-only font implementation.
 
 The logical-to-window coordinate conversion is shared by the vector renderer
 and its tests. Commands are queued while the port overlay builds its display

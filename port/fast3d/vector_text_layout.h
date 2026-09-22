@@ -54,6 +54,19 @@ static inline int geVectorTextNeedsAtlasRebuild(int current_pixel_height,
            current_pixel_height != requested_pixel_height;
 }
 
+/* Convert one physical output pixel back into the logical coordinate space
+ * used by the game.  The vector HUD outline uses this shared conversion so a
+ * high-DPI window gets a one-pixel outline rather than a logical-pixel-sized
+ * halo. */
+static inline float geVectorTextLogicalPixelOffset(float logical_extent,
+                                                   int32_t output_extent)
+{
+    if (!(logical_extent > 0.0f) || output_extent <= 0) {
+        return 0.0f;
+    }
+    return logical_extent / (float)output_extent;
+}
+
 /* Convert the logical VI-space coordinates used by the game-owned overlay to
  * the currently mapped window/FBO rectangle. Keeping this transform separate
  * from FreeType/OpenGL makes layout deterministic and prevents a second,
