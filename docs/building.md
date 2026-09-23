@@ -40,6 +40,7 @@ for accepted versions and hashes.
 | SDL2 | `mingw-w64-x86_64-SDL2` | `libsdl2-dev` | `sdl2` |
 | zlib | `mingw-w64-x86_64-zlib` | `zlib1g-dev` | `zlib` |
 | OpenGL | (in the toolchain) | `libgl1-mesa-dev` | (system) |
+| FreeType 2 (optional vector UI) | `mingw-w64-x86_64-freetype` | `libfreetype6-dev` | `freetype` |
 | Python 3 | `mingw-w64-x86_64-python` | `python3` | `python3` |
 
 ### Asset extraction (decompilation toolchain)

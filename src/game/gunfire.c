@@ -40,6 +40,7 @@
 #ifdef PORT
 #include <stdlib.h>
 #include <stdio.h>
+#include "../../port/fast3d/vector_text.h"
 #include "sight_policy.h"
 extern void _Exit(int status);
 /* D102: the 1P weapon Model and its RW-data pool were punned onto
@@ -6047,6 +6048,7 @@ Gfx *gunDrawHudString(Gfx *gdl, s8 *text, s32 x, s32 halign, s32 y, s32 valign, 
     s32 y2;
     s32 textheight;
     s32 textwidth;
+    s32 bitmap_textwidth;
 
     x1 = 0;
     y1 = 0;
@@ -6055,7 +6057,18 @@ Gfx *gunDrawHudString(Gfx *gdl, s8 *text, s32 x, s32 halign, s32 y, s32 valign, 
     textwidth = 0;
     textheight = 0;
 
-    textMeasure(&textheight, &textwidth, text, ptrFontBankGothicChars, ptrFontBankGothic, 0);
+    textMeasure(&textheight, &bitmap_textwidth, text, ptrFontBankGothicChars,
+                ptrFontBankGothic, 0);
+#ifdef PORT
+    /* The watch ammo display and the gameplay ammo display both use the
+     * Bank Gothic role. Route this shared seam through the same vector face
+     * so the enhanced path cannot give the two displays different fonts. */
+    textwidth = gfx_vector_text_hud_width((const char *)text,
+                                          bitmap_textwidth);
+    textheight = gfx_vector_text_hud_height(textheight);
+#else
+    textwidth = bitmap_textwidth;
+#endif
 
     if (halign == HUDHALIGN_LEFT) { // left
 		x2 = x + textwidth;
@@ -6080,6 +6093,13 @@ Gfx *gunDrawHudString(Gfx *gdl, s8 *text, s32 x, s32 halign, s32 y, s32 valign, 
 	}
 
     gdl = draw_blackbox_to_screen(gdl, &x1, &y1, &x2, &y2);
+
+#ifdef PORT
+    if (gfx_vector_text_queue_hud((int)x1, (int)y1, (const char *)text,
+                                  outline)) {
+        return gdl;
+    }
+#endif
 
     if (outline) {
         gdl = textRenderOutlined(gdl, &x1, &y1, text, ptrFontBankGothicChars, ptrFontBankGothic, -1, 0x646464FF, (s32) viGetX(), viGetY(), 0, 0);

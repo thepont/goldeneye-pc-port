@@ -32,6 +32,8 @@
 #include "gfx_rendering_api.h"
 #include "gfx_screen_config.h"
 #include "dynamic_lighting.h"
+#include "fast3d_pointer_policy.h"
+#include "vector_text.h"
 #include "viewport_policy.h"
 
 uintptr_t gfxFramebuffer;
@@ -65,11 +67,14 @@ uintptr_t gfxFramebuffer;
 
 #define TEXTURE_CACHE_MAX_SIZE 1024
 
-/* Port-only camera light. It follows the view origin, so it behaves like a
- * low-power flashlight without changing the decompiled game logic or N64
- * light state. The option is deliberately off by default for byte-faithful
- * rendering; Video.DynamicLighting opts into the PC enhancement. */
+/* Port-only realtime world lighting. The registry is the single ownership
+ * boundary for all transient lights (camera, muzzle flash, explosion,
+ * searchlight, and future effect adapters). It is reset once per frame and
+ * consumed by the existing RSP vertex-lighting path, so original display-list
+ * and game logic code remains untouched. */
 static bool g_dynamic_lighting_enabled = false;
+static int g_render_mode = GFX_RENDER_ORIGINAL;
+static GeDynamicLightRegistry g_world_lights;
 static constexpr GeDynamicLight kDynamicLight = {
     {0.0f, 0.0f, 0.0f},
     900.0f,
@@ -288,6 +293,62 @@ extern "C" void gfx_set_safe_area_crop(int on) {
 
 extern "C" void gfx_set_dynamic_lighting(int on) {
     g_dynamic_lighting_enabled = !!on;
+}
+
+extern "C" void gfx_set_render_mode(int mode) {
+    if (mode < GFX_RENDER_ORIGINAL) {
+        mode = GFX_RENDER_ORIGINAL;
+    } else if (mode > GFX_RENDER_REMASTER) {
+        mode = GFX_RENDER_REMASTER;
+    }
+    g_render_mode = mode;
+}
+
+extern "C" int gfx_get_render_mode(void) {
+    return g_render_mode;
+}
+
+static bool gfx_world_lighting_enabled(void) {
+    return g_dynamic_lighting_enabled || g_render_mode >= GFX_RENDER_ENHANCED;
+}
+
+extern "C" void gfx_world_lighting_begin_frame(void) {
+    g_world_lights.clear();
+    if (gfx_world_lighting_enabled()) {
+        g_world_lights.add(kDynamicLight);
+    }
+}
+
+extern "C" int gfx_world_lighting_add_point_light(float x, float y, float z,
+                                                     float radius, float intensity,
+                                                     float r, float g, float b,
+                                                     int priority) {
+    GeDynamicLight light = {{x, y, z}, radius, intensity};
+    light.color[0] = r;
+    light.color[1] = g;
+    light.color[2] = b;
+    light.priority = priority;
+    return gfx_world_lighting_enabled() && g_world_lights.add(light) ? 1 : 0;
+}
+
+extern "C" int gfx_world_lighting_add_spot_light(float x, float y, float z,
+                                                    float dx, float dy, float dz,
+                                                    float inner_cos, float outer_cos,
+                                                    float radius, float intensity,
+                                                    float r, float g, float b,
+                                                    int priority) {
+    GeDynamicLight light = {{x, y, z}, radius, intensity};
+    light.color[0] = r;
+    light.color[1] = g;
+    light.color[2] = b;
+    light.direction[0] = dx;
+    light.direction[1] = dy;
+    light.direction[2] = dz;
+    light.inner_cos = inner_cos;
+    light.outer_cos = outer_cos;
+    light.type = GeDynamicLightType::Spot;
+    light.priority = priority;
+    return gfx_world_lighting_enabled() && g_world_lights.add(light) ? 1 : 0;
 }
 
 uint32_t gfx_msaa_level = 1;
@@ -1376,8 +1437,7 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t* addr) {
      * crash the menu transition, substitute identity for an unmapped source
      * (the model draws with the wrong transform - already a parked D75
      * cosmetic - but the screen and its "Next" -> menu path work). */
-    const bool addr_bad = ((uintptr_t)addr < 0x10000 ||
-                           (uintptr_t)addr >= 0x0000800000000000ULL);
+    const bool addr_bad = !geFast3dPointerLooksMapped((uintptr_t)addr);
 
     if (addr_bad) {
         memset(matrix, 0, sizeof(matrix));
@@ -1456,8 +1516,7 @@ static void gfx_adjust_width_height_for_scale(uint32_t& width, uint32_t& height)
  * DL (D75 family) hands wild pointers to the RSP command handlers; abort()
  * over one bad menu model is the wrong trade for a breadth-first port. */
 static inline bool fast3d_ptr_ok(const void *p) {
-    uintptr_t v = (uintptr_t)p;
-    return v >= 0x10000 && v < 0x0000800000000000ULL;
+    return geFast3dPointerLooksMapped((uintptr_t)p);
 }
 
 static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* vertices) {
@@ -1529,7 +1588,7 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
                 }
             }
 
-            if (g_dynamic_lighting_enabled) {
+            if (gfx_world_lighting_enabled()) {
                 const float (*modelview)[4] =
                     rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1];
                 const float view_position[3] = {
@@ -1548,11 +1607,16 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
                 };
                 float view_normal[3];
                 gfx_transposed_matrix_mul(view_normal, object_normal, modelview);
-                const float intensity = geDynamicLightIntensity(
-                    view_normal, view_position, kDynamicLight);
-                r += intensity * 255.0f;
-                g += intensity * 255.0f;
-                b += intensity * 255.0f;
+                for (std::size_t light_index = 0;
+                     light_index < g_world_lights.size(); ++light_index) {
+                    float contribution[3];
+                    geDynamicLightContribution(
+                        view_normal, view_position,
+                        g_world_lights[light_index], contribution);
+                    r += contribution[0] * 255.0f;
+                    g += contribution[1] * 255.0f;
+                    b += contribution[2] * 255.0f;
+                }
             }
 
             d->color.r = r > 255 ? 255 : r;
@@ -3852,6 +3916,12 @@ extern "C" void gfx_start_frame(void) {
     gfx_current_game_window_viewport.width = gfx_current_dimensions.width;
     gfx_current_game_window_viewport.height = gfx_current_dimensions.height;
 
+    /* Start the port-owned world-light frame before the game builds/submits
+     * its display list. Future effect adapters can submit muzzle/explosion or
+     * searchlight lights between this boundary and gfx_run(). */
+    gfx_world_lighting_begin_frame();
+    gfx_vector_text_begin_frame();
+
     if (gfx_current_dimensions.height != gfx_prev_dimensions.height) {
         for (auto& fb : framebuffers) {
             uint32_t width, height, msaa;
@@ -3942,6 +4012,7 @@ extern "C" void gfx_run(Gfx* commands) {
         }
     }
     gfx_flush();
+    gfx_vector_text_draw();
     gfxFramebuffer = 0;
 
     if (game_renders_to_framebuffer) {

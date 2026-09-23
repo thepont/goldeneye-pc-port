@@ -2,6 +2,7 @@
 #ifdef PORT
 #include <stdio.h>
 #include <stdlib.h>
+#include "../../port/fast3d/vector_text.h"
 #endif
 #include <math.h>
 #include <bondtypes.h>
@@ -10201,6 +10202,12 @@ Gfx* hudmsgBottomRender(Gfx* arg0)
             view_left_offset = 0;
             view_top_offset = 0;
             textMeasure(&view_top_offset, &view_left_offset ,(u8* ) stringbuffer_lowerleft[status_bar_text_buffer_index], BONDVIEW_2ND_FONTTABLE(status_bar_text_buffer_index), BONDVIEW_1ST_FONTTABLE(status_bar_text_buffer_index), 0);
+#ifdef PORT
+            view_top_offset = gfx_vector_text_hud_height(view_top_offset);
+            view_left_offset = gfx_vector_text_hud_width(
+                stringbuffer_lowerleft[status_bar_text_buffer_index],
+                view_left_offset);
+#endif
 
             if (getPlayerCount() < 3)
             {
@@ -10245,6 +10252,13 @@ Gfx* hudmsgBottomRender(Gfx* arg0)
 
             view_vert = view_top - view_top_offset;
             arg0 = draw_blackbox_to_screen(arg0, (s32) &view_left, (s32) &view_vert, (s32) &view_horiz, (s32) &view_top);
+#ifdef PORT
+            if (gfx_vector_text_queue_hud(
+                    (int)view_left, (int)view_vert,
+                    stringbuffer_lowerleft[status_bar_text_buffer_index], 1)) {
+                arg0 = combiner_bayer_lod_perspective(arg0);
+            } else
+#endif
             arg0 = combiner_bayer_lod_perspective(textRenderOutlined(arg0, &view_left, &view_vert, stringbuffer_lowerleft[status_bar_text_buffer_index], BONDVIEW_2ND_FONTTABLE(status_bar_text_buffer_index), BONDVIEW_1ST_FONTTABLE(status_bar_text_buffer_index), -1, 0x646464FFU, (s16) (s32) viGetX(), (s16) viGetY(), 0, 0));
         }
     }
