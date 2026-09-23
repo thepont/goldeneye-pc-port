@@ -6,6 +6,9 @@
 #include "loadobjectmodel.h"
 #include "stan.h"
 #include "model.h"
+#ifdef PORT
+#include "level_status_contract_policy.h"
+#endif
 
 /**
  * Address 0x7F056850.
@@ -401,6 +404,16 @@ s32 setupGetCommandIndexByProp(struct PropRecord *prop)
 
 s32 modelLoad(s32 modelid)
 {
+#ifdef PORT
+    /* PitemZ_entries is the fixed 341-entry converted model table. Validate
+     * the index before obtaining the header used by the shared predicate. */
+    if (modelid < 0 || modelid >= 341 ||
+        !geModelLoadCurrentlyAccepted(
+            modelid, 341, PitemZ_entries[modelid].header))
+    {
+        return FALSE;
+    }
+#endif
     if (PitemZ_entries[modelid].header->RootNode == NULL)
     {
         fileLoad(PitemZ_entries[modelid].header,PitemZ_entries[modelid].filename/*, "prop"*/);
@@ -570,13 +583,13 @@ ObjectRecord *setupFindObjForReuse(s32 wanttype, ObjectRecord **offscreenobjptr,
     ObjectRecord *offscreenobj = NULL;
     ObjectRecord *anyobj = NULL;
 
-    u32 *cmd = g_CurrentSetup.propDefs;
+    PropDefHeaderRecord *cmd = g_CurrentSetup.propDefs;
 
     if (cmd)
     {
-        while ((u8)cmd[0] != PROPDEF_END)
+        while (cmd->type != PROPDEF_END)
         {
-            if ((wanttype & 0xff) == (u8)cmd[0])
+            if ((wanttype & 0xff) == cmd->type)
             {
                 ObjectRecord *obj = (ObjectRecord *)cmd;
 
@@ -614,4 +627,3 @@ ObjectRecord *setupFindObjForReuse(s32 wanttype, ObjectRecord **offscreenobjptr,
 
     return NULL;
 }
-

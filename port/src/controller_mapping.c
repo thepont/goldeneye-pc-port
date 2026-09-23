@@ -55,6 +55,81 @@ int geControllerScaleAxis(int value, int deadzone, int output_max)
     return (int)scaled;
 }
 
+int geControllerApplyLookInvertY(int value, int inverted)
+{
+    return inverted ? -value : value;
+}
+
+static int geControllerMenuModeAvailable(int mode,
+                                         int multiplayer_available,
+                                         int coop_available,
+                                         int cheats_available)
+{
+    switch (mode)
+    {
+    case GE_CONTROLLER_MENU_MODE_SOLO:
+        return 1;
+    case GE_CONTROLLER_MENU_MODE_MULTI:
+        return multiplayer_available != 0;
+    case GE_CONTROLLER_MENU_MODE_CHEATS:
+        return cheats_available != 0;
+    case GE_CONTROLLER_MENU_MODE_COOP:
+        return coop_available != 0;
+    default:
+        return 0;
+    }
+}
+
+int geControllerMenuModeMove(int current_mode,
+                             int direction,
+                             int multiplayer_available,
+                             int coop_available,
+                             int cheats_available)
+{
+    static const int order[] = {
+        GE_CONTROLLER_MENU_MODE_SOLO,
+        GE_CONTROLLER_MENU_MODE_MULTI,
+        GE_CONTROLLER_MENU_MODE_COOP,
+        GE_CONTROLLER_MENU_MODE_CHEATS,
+    };
+    int index = 0;
+    int step;
+    int i;
+
+    for (i = 0; i < (int)(sizeof(order) / sizeof(order[0])); i++)
+    {
+        if (order[i] == current_mode)
+        {
+            index = i;
+            break;
+        }
+    }
+
+    if (direction == 0)
+    {
+        return geControllerMenuModeAvailable(
+                   current_mode, multiplayer_available,
+                   coop_available, cheats_available)
+                   ? current_mode
+                   : GE_CONTROLLER_MENU_MODE_SOLO;
+    }
+
+    step = direction < 0 ? -1 : 1;
+    for (i = 0; i < (int)(sizeof(order) / sizeof(order[0])); i++)
+    {
+        index = (index + step + (int)(sizeof(order) / sizeof(order[0]))) %
+                (int)(sizeof(order) / sizeof(order[0]));
+        if (geControllerMenuModeAvailable(
+                order[index], multiplayer_available,
+                coop_available, cheats_available))
+        {
+            return order[index];
+        }
+    }
+
+    return GE_CONTROLLER_MENU_MODE_SOLO;
+}
+
 unsigned geControllerMapDigitalButtons(GeControllerDigitalState state,
                                        int menu_mode)
 {

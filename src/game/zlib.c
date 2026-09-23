@@ -1,7 +1,12 @@
 #include <ultra64.h>
 #include "zlib.h"
+#ifdef PORT
+#include "hoststring.h"
+#include <strings.h>
+#else
 #include "include/string.h"
 #include "include/bstring.h"
+#endif
 
 /* this file comes from gzip (1.2.4, 1993-08-20 release), but 
  * inflate.c placed in public domain by Mark Adler */
@@ -10,6 +15,20 @@
 #define NEXTBYTE()  (u8)GETBYTE()
 #define NEEDBITS(n) {while(k<(n)){b|=((u32)NEXTBYTE())<<k;k+=8;}}
 #define DUMPBITS(n) {b>>=(n);k-=(n);}
+
+/* The original N64 guard compares 32-bit address values because the input
+ * and output windows share the console's address space.  Truncating host
+ * pointers to s32 makes unrelated PC allocations appear to overlap and can
+ * enter the original diagnostic's intentional infinite loop.  The PC RZ
+ * adapter owns separate host input/output buffers, so the console-only guard
+ * must not be applied to host addresses. */
+#ifdef PORT
+#define RZ_OUTPUT_INPUT_OVERLAP(output_ptr) (0)
+#else
+#define RZ_OUTPUT_INPUT_OVERLAP(output_ptr) \
+    (((u32)(s32)(output_ptr) >= (u32)(s32)&rz_inbuf[rz_inptr]) && \
+     ((u32)((s32)(output_ptr) - (s32)&rz_inbuf[rz_inptr]) < WSIZE))
+#endif
 
 #define WSIZE 0x8000U
 #define BMAX 16
@@ -309,12 +328,9 @@ s32 zlib_inflate_codes(struct huft *tl, struct huft *td, s32 bl, s32 bd)
 
         if (e == 16)                /* then it's a literal */
         {
-            if ((u32)(s32)&rz_outbuf[w] >= (u32)(s32)&rz_inbuf[rz_inptr])
+            if (RZ_OUTPUT_INPUT_OVERLAP(&rz_outbuf[w]))
             {
-                if ((u32)((s32)&rz_outbuf[w] - (s32)&rz_inbuf[rz_inptr]) < WSIZE)
-                {
-                    while(1){}              
-                }
+                while(1){}
             }
             
             rz_outbuf[w++] = (u8)t->v.n;
@@ -359,12 +375,9 @@ s32 zlib_inflate_codes(struct huft *tl, struct huft *td, s32 bl, s32 bd)
                 
                 if (w - d >= e)         /* (this test assumes unsigned comparison) */
                 {
-                    if ((u32)(s32)&rz_outbuf[w+e-1] >= (u32)(s32)&rz_inbuf[rz_inptr])
+                    if (RZ_OUTPUT_INPUT_OVERLAP(&rz_outbuf[w+e-1]))
                     {
-                        if ((u32)((s32)&rz_outbuf[w+e-1] - (s32)&rz_inbuf[rz_inptr]) < WSIZE)
-                        {
-                            while(1){}              
-                        }
+                        while(1){}
                     }
 
                     memcpy(&rz_outbuf[w], &rz_outbuf[d], e);
@@ -375,12 +388,9 @@ s32 zlib_inflate_codes(struct huft *tl, struct huft *td, s32 bl, s32 bd)
                 {
                     do
                     {
-                        if ((u32)(s32)&rz_outbuf[w] >= (u32)(s32)&rz_inbuf[rz_inptr])
+                        if (RZ_OUTPUT_INPUT_OVERLAP(&rz_outbuf[w]))
                         {
-                            if ((u32)((s32)&rz_outbuf[w] - (s32)&rz_inbuf[rz_inptr]) < WSIZE)
-                            {
-                                while(1){}              
-                            }
+                            while(1){}
                         }
 
                         rz_outbuf[w++] = rz_outbuf[d++];
@@ -436,12 +446,9 @@ s32 zlib_inflate_stored(void)
     {
 		NEEDBITS(8)
         
-        if ((u32)(s32)&rz_outbuf[w] >= (u32)(s32)&rz_inbuf[rz_inptr])
+        if (RZ_OUTPUT_INPUT_OVERLAP(&rz_outbuf[w]))
         {
-            if ((u32)((s32)&rz_outbuf[w] - (s32)&rz_inbuf[rz_inptr]) < WSIZE)
-            {
-                while(1){}              
-            }
+            while(1){}
         }
         
         rz_outbuf[w++] = (u8)b;

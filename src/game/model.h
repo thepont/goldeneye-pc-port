@@ -72,6 +72,7 @@ f32 modelGetAnimEndFrame(Model *model);
 f32 modelGetAnimSpeed(Model *model);
 f32 modelGetAbsAnimSpeed(Model *model);
 s32 modelConstrainOrWrapAnimFrame(s32 frame, ModelAnimation *anim, f32 endframe);
+u32 modelAnimReadBitsAsU16Angle(u8 *bitstream, u8 width, u32 bitOffset);
 void modelCopyAnimForMerge(Model *model, f32 timemerge);
 void modelSetAnimation2(Model *, ModelAnimation *, s32, f32, f32, f32);
 void modelSetAnimationWithMerge(Model *model, ModelAnimation *modelAnimation, s32 flip, f32 startframe, f32 speed, f32 timemerge, s32 domerge);
@@ -110,8 +111,16 @@ void sub_GAME_7F074534(ModelRenderData* data, Model* model, ModelNode* node);
 void subdraw(ModelRenderData *arg0, struct Model *);
 s32 loadAnimationFrame(ModelAnimation* anim, s32 frame, ModelSkeleton* unused);
 void modelResetAnimationsScratchBuffer(void);
+#ifdef PORT
+/* PC model sidecars carry 32-bit VMAs, but the loaded image itself is a host
+ * allocation and must retain its full pointer width during relocation. */
+void modelPromoteNodeOffsetsToPointers(ModelNode *node, u32 vma,
+                                       uintptr_t fileramaddr);
+void sub_GAME_7F075A90(ModelFileHeader *header, s32 vma, uintptr_t addr);
+#else
 void modelPromoteNodeOffsetsToPointers(ModelNode *node, u32 vma, u32 fileramaddr);
 void sub_GAME_7F075A90(ModelFileHeader *header, s32 vma, u32 addr);
+#endif
 s32 modelCalculateRwDataIndexes(ModelNode *basenode);
 void modelCalculateRwDataLen(struct ModelFileHeader *objheader);
 void modelInitRwData(Model *model, ModelNode *startnode);
@@ -127,4 +136,3 @@ void return_null(void);
 #endif
 
 #endif
-

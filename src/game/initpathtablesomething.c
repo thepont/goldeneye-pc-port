@@ -10,7 +10,11 @@ s32 init_pathtable_something(struct PadRecord *pad, char *tilename, struct Stand
 {
     struct coord3d coord;
    
-    *tile_stack = stanMatchTileName(tilename);
+    /* The named lookup walks the same raw stand stream as StandTile, but its
+     * historical API exposes the entry as StandTilePoint. Make that layout
+     * adapter explicit at this boundary instead of relying on an incompatible
+     * pointer assignment. */
+    *tile_stack = (StandTile *)stanMatchTileName(tilename);
     
     if ((*tile_stack == NULL) || (isPointInsideTriStandTileUnscaled_Maybe(*tile_stack, pad->pos.f[0], pad->pos.f[2]) == 0))
     {

@@ -1,5 +1,8 @@
 #include <ultra64.h>
 #include <memp.h>
+#ifdef PORT
+#include <stdint.h>
+#endif
 #include "front.h"
 #include "initmenus.h"
 #include "initintromatrices.h"
@@ -40,13 +43,20 @@ void init_menus_or_reset(void)
     ptr_logo_and_walletbond_DL = (u8 *)mempAllocBytesInBank(0x78000, MEMPOOL_STAGE); // allocation in bytes so cast to u8 from gfx
 #endif
 
-#if defined(VERSION_EU)
-    ptr_menu_videobuffer = mempAllocBytesInBank(0x55040, MEMPOOL_STAGE);
+#ifdef PORT
+  #if defined(VERSION_EU)
+    ptr_menu_videobuffer = (u8 *)(((uintptr_t)mempAllocBytesInBank(0x55040, MEMPOOL_STAGE) + 0x3FU) & ~(uintptr_t)0x3FU);
+  #else
+    ptr_menu_videobuffer = (u8 *)(((uintptr_t)mempAllocBytesInBank(0x4b040, MEMPOOL_STAGE) + 0x3FU) & ~(uintptr_t)0x3FU);
+  #endif
 #else
+  #if defined(VERSION_EU)
+    ptr_menu_videobuffer = mempAllocBytesInBank(0x55040, MEMPOOL_STAGE);
+  #else
     ptr_menu_videobuffer = mempAllocBytesInBank(0x4b040, MEMPOOL_STAGE);
-#endif
-
+  #endif
     ptr_menu_videobuffer = ALIGN64_V1(ptr_menu_videobuffer);
+#endif
 
     for (i = 0; i < 4; i++)
     {

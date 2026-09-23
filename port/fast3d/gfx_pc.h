@@ -54,6 +54,10 @@ typedef std::pair<const TextureCacheKey, struct TextureCacheValue> TextureCacheN
 
 struct TextureCacheValue {
     uint32_t texture_id;
+    /* Optional renderer-side normal map associated with this ROM texture. */
+    uint32_t bump_texture_id = 0;
+    bool bump_map_available = false;
+    const uint8_t *bump_source_addr = nullptr;
     uint8_t cms, cmt;
     bool linear_filter;
 

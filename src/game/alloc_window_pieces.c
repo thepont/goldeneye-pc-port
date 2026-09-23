@@ -10,8 +10,17 @@ void alloc_shattered_window_pieces(void)
 {
     s32 i;
     s32 level = lvlGetCurrentStageToLoad();
+    s32 player_count = getPlayerCount();
 
-    SHATTERED_WINDOW_PIECES_BUFFER_LEN = (200 / getPlayerCount());
+    /* Stage allocation can run while the player roster is still being
+     * assembled. Treat an empty roster as the solo case instead of dividing
+     * by zero and aborting the process. */
+    if (player_count <= 0)
+    {
+        player_count = 1;
+    }
+
+    SHATTERED_WINDOW_PIECES_BUFFER_LEN = (200 / player_count);
     if ((level == LEVELID_STREETS) || (level == LEVELID_DEPOT))
     {
         SHATTERED_WINDOW_PIECES_BUFFER_LEN = (SHATTERED_WINDOW_PIECES_BUFFER_LEN >> 1);
@@ -29,4 +38,3 @@ void alloc_shattered_window_pieces(void)
 
     g_NextShardNum = 0;
 }
-

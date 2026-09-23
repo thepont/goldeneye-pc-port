@@ -4,6 +4,34 @@
 
 #define HALF2RAD(x) (x * (M_PI_F / 32768.0f))
 
+static void quaternion_set_identity(quatf q)
+{
+    q[0] = 1.0f;
+    q[1] = 0.0f;
+    q[2] = 0.0f;
+    q[3] = 0.0f;
+}
+
+static void quaternion_set_identity_matrix(mat44f matrix)
+{
+    matrix[0][0] = 1.0f;
+    matrix[0][1] = 0.0f;
+    matrix[0][2] = 0.0f;
+    matrix[0][3] = 0.0f;
+    matrix[1][0] = 0.0f;
+    matrix[1][1] = 1.0f;
+    matrix[1][2] = 0.0f;
+    matrix[1][3] = 0.0f;
+    matrix[2][0] = 0.0f;
+    matrix[2][1] = 0.0f;
+    matrix[2][2] = 1.0f;
+    matrix[2][3] = 0.0f;
+    matrix[3][0] = 0.0f;
+    matrix[3][1] = 0.0f;
+    matrix[3][2] = 0.0f;
+    matrix[3][3] = 1.0f;
+}
+
 void quaternion_set_rotation_around_xyz(vec3u angles, quatf q)
 {
     f32 cos_x = cosf(HALF2RAD(angles[0]) * 0.5f);
@@ -66,7 +94,17 @@ void quaternion_set_rotation_around_z(f32 angle, quatf q)
 
 void quaternion_to_matrix(quatf q, mat44f matrix)
 {
-    f32 temp_f6 = 2.0f / ((q[0] * q[0]) + (q[1] * q[1]) + (q[2] * q[2]) +  (q[3] * q[3]));
+    f32 norm_squared = (q[0] * q[0]) + (q[1] * q[1]) +
+                       (q[2] * q[2]) + (q[3] * q[3]);
+    f32 temp_f6;
+
+    if (!(norm_squared > 0.0f))
+    {
+        quaternion_set_identity_matrix(matrix);
+        return;
+    }
+
+    temp_f6 = 2.0f / norm_squared;
     f32 temp_f18 = q[1] * temp_f6;
     f32 temp_f16 = q[2] * temp_f6;
     f32 temp_f14 = q[3] * temp_f6;
@@ -101,6 +139,19 @@ void quaternion_from_matrix(mat44f arg0, quatf arg1)
 {
     f32 var1;
     f32 var2;
+    f32 matrix_energy =
+        (arg0[0][0] * arg0[0][0]) + (arg0[0][1] * arg0[0][1]) +
+        (arg0[0][2] * arg0[0][2]) + (arg0[1][0] * arg0[1][0]) +
+        (arg0[1][1] * arg0[1][1]) + (arg0[1][2] * arg0[1][2]) +
+        (arg0[2][0] * arg0[2][0]) + (arg0[2][1] * arg0[2][1]) +
+        (arg0[2][2] * arg0[2][2]);
+
+    if (!(matrix_energy > 0.0f))
+    {
+        quaternion_set_identity(arg1);
+        return;
+    }
+
     f32 trace = arg0[0][0] + arg0[1][1] + arg0[2][2] + 1.0f;
     if (0.0f < trace) {
         var1 = sqrtf(trace);

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "coop.h"
+#include "level_status_contract_policy.h"
 extern GAMEMODE gamemode;
 #endif
 #include <memp.h>
@@ -13,6 +14,9 @@ extern GAMEMODE gamemode;
 #include "chr.h"
 #include "chrai.h"
 #include "chraction.h"
+#ifdef PORT
+#include "cctv.h"
+#endif
 #include "propobj.h"
 #include "inititemslots.h"
 #include "initobjects.h"
@@ -645,20 +649,26 @@ void setupCctv(s32 arg0, CCTVRecord *arg1, s32 cmdindex)
     struct PadRecord *sp50;
     struct coord3d sp44;
     Mtxf *sp3C;
+    s32 lookpad;
 
     domakedefaultobj(arg0, (struct ObjectRecord*)arg1, cmdindex);
 
     if (arg1->pad >= 0)
     {
         temp_a2 = (struct coord3d*)arg1->model->obj->Switches[0]->Data;
+#ifdef PORT
+        lookpad = cctvGetLookPad(arg1);
+#else
+        lookpad = arg1->pad;
+#endif
 
-        if (isNotBoundPad(arg1->pad))
+        if (isNotBoundPad(lookpad))
         {
-            sp50 = &g_CurrentSetup.pads[arg1->pad];
+            sp50 = &g_CurrentSetup.pads[lookpad];
         }
         else
         {
-            sp50 = (struct PadRecord *)&g_CurrentSetup.boundpads[getBoundPadNum(arg1->pad)];
+            sp50 = (struct PadRecord *)&g_CurrentSetup.boundpads[getBoundPadNum(lookpad)];
         }
 
         sp44.f[0] = temp_a2->f[0];
@@ -897,22 +907,50 @@ void sub_GAME_7F00324C(struct BoundPadRecord *arg0, s32 *arg1, s32 *arg2, struct
     arg3->f[2] = center.f[2] + (normal.f[2] * 50.0f);
 
 
+#ifdef PORT
+    if (geTileWalkResultCurrentlyAccepted(
+            walkTilesBetweenPoints_NoCallback(
+                &sp4C, center.f[0], center.f[2], arg3->f[0], arg3->f[2]),
+            sp4C))
+    {
+        *arg1 = (s32) sp4C->room;
+    }
+    else
+    {
+        *arg1 = -1;
+    }
+#else
     walkTilesBetweenPoints_NoCallback(&sp4C, center.f[0], center.f[2], arg3->f[0], arg3->f[2]);
 
     if (1);
 
     *arg1 = (s32) sp4C->room;
+#endif
     sp4C = sp2C;
 
     arg4->f[0] = center.f[0] - (normal.f[0] * 50.0f);
     arg4->f[1] = center.f[1];
     arg4->f[2] = center.f[2] - (normal.f[2] * 50.0f);
 
+#ifdef PORT
+    if (geTileWalkResultCurrentlyAccepted(
+            walkTilesBetweenPoints_NoCallback(
+                &sp4C, center.f[0], center.f[2], arg4->f[0], arg4->f[2]),
+            sp4C))
+    {
+        *arg2 = (s32) sp4C->room;
+    }
+    else
+    {
+        *arg2 = -1;
+    }
+#else
     walkTilesBetweenPoints_NoCallback(&sp4C, center.f[0], center.f[2], arg4->f[0], arg4->f[2]);
 
     if (1);
 
     *arg2 = (s32) sp4C->room;
+#endif
 
     if (*arg2 == *arg1)
     {
@@ -1990,7 +2028,7 @@ void proplvreset2(enum LEVELID stageId)
                             pdef_safe->item = safe_item;
                             pdef_safe->safe = safe;
                             pdef_safe->door = door;
-                            initSetLevelLoadPropSafeItem((struct ObjectRecord *) pdef_safe);
+                            initSetLevelLoadPropSafeItem(pdef_safe);
                             safe_item->flags2 |= PROPFLAG2_LINKEDTOSAFE;
                             door->flags2 |= PROPFLAG2_LINKEDTOSAFE;
                         }

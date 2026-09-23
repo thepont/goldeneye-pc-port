@@ -7,7 +7,7 @@
 #include "math.h"
 #include "fr.h"
 
-#ifndef DEBUG
+#if !defined(DEBUG) && !defined(GE007_DEBUG_CAMERA_TEST)
     #define osSyncPrintf(...) /* PC port: variadic (was ()); IDO tolerated fixed-arg count, GCC does not */
 #endif
 
@@ -230,7 +230,7 @@ void initializeDebugCameraPosition(void)
 {
     coord3d *pos = bondviewGetCurrentPlayersPosition();
     f32      r   = M_TAU_F - bondviewGetPlayerYawRadians();
-    f32      x   = ((debugCameraPosition.x - pos->x) * cosf(r)) + ((debugCameraPosition.x - pos->x) * sinf(r));
+    f32      x   = ((debugCameraPosition.x - pos->x) * cosf(r)) + ((debugCameraPosition.z - pos->z) * sinf(r));
     f32      y   = debugCameraPosition.y - pos->y;
     f32      z   = (debugCameraPosition.z - pos->z) * cosf(r) - (debugCameraPosition.x - pos->x) * sinf(r);
     osSyncPrintf("propBondIntroKey(INTROKEY_RELBONDDIR,%ff,%ff,%ff,0.75f,40.0f) ", x, y, z);

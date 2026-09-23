@@ -428,6 +428,11 @@ s32 fileGetIndex(u8 *resname)
     s32 size;
     struct resource_lookup_data_entry *lookup;
 
+    if (resname == NULL)
+    {
+        return 0;
+    }
+
     for (i = 1; i < file_entry_max; i++)
     {
         if (file_resource_table[i].filename != NULL)
@@ -447,12 +452,12 @@ s32 fileGetIndex(u8 *resname)
         return 0;
     }
     
-    file_entry_max++;
-
     if (indycommHostCheckFileExists(resname, &size) == 0)
     {
         return 0;
     }
+
+    file_entry_max++;
 
     file_resource_table[i].index = i; // offset 0
     file_resource_table[i].filename = resname;  // offset 4
@@ -518,6 +523,5 @@ void sub_GAME_7F0BD410(void)
         }    
     }
 }
-
 
 

@@ -1,6 +1,9 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <SDL.h>
 #include <time.h>
+#include <dlfcn.h>
 
 #include "platform.h"
 #include "system.h"
@@ -8,7 +11,10 @@
 #include "gfx_window_manager_api.h"
 #include "gfx_screen_config.h"
 #include "input.h"
+#include "video.h"
 #include "ascension_postfx.h"
+#include "gfx_wayland_surface_policy.h"
+#include "glad/glad.h"
 
 static SDL_Window* wnd;
 static SDL_GLContext ctx;
@@ -23,6 +29,53 @@ static bool fullscreen_state;
 static bool maximized_state;
 static bool is_running = true;
 static void (*on_fullscreen_changed_callback)(bool is_now_fullscreen);
+/* Wayland's event queue, window operations, context, and presentation share
+ * one wl_display. The scheduler thread owns that complete lifecycle there;
+ * X11 retains the host-thread pump because its native window contract differs. */
+static bool wayland_backend;
+static bool host_thread_pumps_events = true;
+static GeWaylandSurfaceState wayland_surface;
+static bool window_shown;
+static bool render_thread_has_context;
+static int requested_swap_interval = 1;
+static bool wayland_uncapped_warning_logged;
+static unsigned int wayland_trace_swaps;
+static unsigned int wayland_trace_prepares;
+
+static void gfx_sdl_trace_egl_config(void)
+{
+    void *library = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_NOLOAD);
+    if (library == nullptr) {
+        sysLogPrintf(LOG_NOTE, "EGL_TRACE: libEGL is not loaded");
+        return;
+    }
+    using GetCurrentDisplay = void *(*)();
+    using GetCurrentContext = void *(*)();
+    using QueryContext = int (*)(void *, void *, int, int *);
+    using QueryString = const char *(*)(void *, int);
+    const auto get_display = reinterpret_cast<GetCurrentDisplay>(
+        dlsym(library, "eglGetCurrentDisplay"));
+    const auto get_context = reinterpret_cast<GetCurrentContext>(
+        dlsym(library, "eglGetCurrentContext"));
+    const auto query_context = reinterpret_cast<QueryContext>(
+        dlsym(library, "eglQueryContext"));
+    const auto query_string = reinterpret_cast<QueryString>(
+        dlsym(library, "eglQueryString"));
+    void *display = get_display != nullptr ? get_display() : nullptr;
+    void *context = get_context != nullptr ? get_context() : nullptr;
+    int config_id = -1;
+    if (query_context != nullptr && display != nullptr && context != nullptr) {
+        query_context(display, context, 0x3028, &config_id);
+    }
+    const char *extensions = display != nullptr && query_string != nullptr
+        ? query_string(display, 0x3055)
+        : nullptr;
+    sysLogPrintf(LOG_NOTE, "EGL_TRACE: config=%d extensions=%s", config_id,
+                 extensions != nullptr ? extensions : "unavailable");
+    dlclose(library);
+}
+
+static constexpr unsigned long kWaylandSurfaceReadyTimeoutMs = 2000;
 
 // GE port: frame pacing is owned by the cooperative thread kernel's vsync
 // tick (libultra.c posts one VI retrace per frame at the console rate), so
@@ -102,6 +155,18 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
         sysFatalError("Could not init SDL:\n%s", SDL_GetError());
     }
 
+    const char *video_driver = SDL_GetCurrentVideoDriver();
+    wayland_backend = video_driver != nullptr &&
+                      strcmp(video_driver, "wayland") == 0;
+    host_thread_pumps_events = !wayland_backend;
+    wayland_surface = geWaylandSurfaceCreate(wayland_backend);
+    window_shown = false;
+    render_thread_has_context = false;
+    requested_swap_interval = 1;
+    wayland_uncapped_warning_logged = false;
+    wayland_trace_swaps = 0;
+    wayland_trace_prepares = 0;
+
     // Auto window size: a width/height <= 0 means "pick a sensible default from
     // the desktop" rather than the 640x480 native res. Fit a 4:3 window into
     // ~85% of the primary desktop -- big enough to actually judge mouse/menu
@@ -127,11 +192,6 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
 
     int posX = set->x;
     int posY = set->y;
-    int display_in_use = SDL_GetWindowDisplayIndex(wnd);
-    if (display_in_use < 0) { // Fallback to default if out of bounds
-        posX = SDL_WINDOWPOS_UNDEFINED;
-        posY = SDL_WINDOWPOS_UNDEFINED;
-    }
 
     if (set->centered) {
         SDL_DisplayMode mode = {};
@@ -144,7 +204,9 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
         fullscreen_flag = SDL_WINDOW_FULLSCREEN;
     }
 
-    // we will unhide the window once the GL context is successfully created
+    // The window is shown after the context is transferred to the render
+    // thread. This makes the first Wayland configure and every presentation
+    // part of one thread-owned lifecycle instead of racing the host loop.
     Uint32 flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL;
 
     // if fullscreen was requested, start the window in fullscreen right away
@@ -221,12 +283,48 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
         sysFatalError("Could not open SDL window with an OpenGL context of any supported version:\n%s", SDL_GetError());
     } else {
         sysLogPrintf(LOG_NOTE, "SDL: created GL%d.%d%s context", vmaj, vmin, vprofstr);
+        if (getenv("GE_WAYLAND_TRACE_ATTRS") != nullptr) {
+            int red = 0;
+            int green = 0;
+            int blue = 0;
+            int alpha = 0;
+            int depth = 0;
+            int stencil = 0;
+            int double_buffer = 0;
+            int profile = 0;
+            int major = 0;
+            int minor = 0;
+            int flags = 0;
+            SDL_GL_GetAttribute(SDL_GL_RED_SIZE, &red);
+            SDL_GL_GetAttribute(SDL_GL_GREEN_SIZE, &green);
+            SDL_GL_GetAttribute(SDL_GL_BLUE_SIZE, &blue);
+            SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &alpha);
+            SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &depth);
+            SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &stencil);
+            SDL_GL_GetAttribute(SDL_GL_DOUBLEBUFFER, &double_buffer);
+            SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &profile);
+            SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &major);
+            SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &minor);
+            SDL_GL_GetAttribute(SDL_GL_CONTEXT_FLAGS, &flags);
+            sysLogPrintf(LOG_NOTE,
+                         "SDL_GL_ATTRS: rgba=%d,%d,%d,%d depth=%d stencil=%d "
+                         "double=%d profile=%d version=%d.%d flags=0x%x",
+                         red, green, blue, alpha, depth, stencil,
+                         double_buffer, profile, major, minor, flags);
+            gfx_sdl_trace_egl_config();
+        }
     }
 
     SDL_GL_MakeCurrent(wnd, ctx);
+    if (getenv("GE_WAYLAND_TRACE_ATTRS") != nullptr) {
+        sysLogPrintf(LOG_NOTE, "EGL_TRACE: after-gfx-sdl-make-current");
+        gfx_sdl_trace_egl_config();
+    }
     SDL_GL_SetSwapInterval(1);
-
-    SDL_ShowWindow(wnd);
+    if (getenv("GE_WAYLAND_TRACE_ATTRS") != nullptr) {
+        sysLogPrintf(LOG_NOTE, "EGL_TRACE: after-gfx-sdl-initial-swap-interval");
+        gfx_sdl_trace_egl_config();
+    }
 
     qpc_freq = SDL_GetPerformanceFrequency();
 }
@@ -313,64 +411,52 @@ static void gfx_sdl_get_dimensions(uint32_t* width, uint32_t* height, int32_t* p
 static void gfx_sdl_handle_events(void) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
-        switch (event.type) {
-            case SDL_KEYDOWN:
-                if (event.key.keysym.sym == SDLK_RETURN && (event.key.keysym.mod & KMOD_ALT)) {
-                    // alt-enter received, switch fullscreen state
-                    set_fullscreen(!fullscreen_state, true);
-                } else if (event.key.keysym.sym == SDLK_F4 && (event.key.keysym.mod & KMOD_ALT)) {
-                    // D145: Alt+F4 quits; bare ESC no longer does (it is the
-                    // menu "back" key -- see port/src/video.c / input.c).
-                    exit(0);
-                } else if (event.key.keysym.sym == SDLK_ESCAPE && !event.key.repeat) {
-                    // WI-1: this render-thread pump and port/src/video.c's
-                    // host-thread pump both drain the same SDL queue, so either
-                    // one can be the loop that dequeues a given ESC keydown.
-                    // Handle it here too or click-to-lock's ESC-to-free races
-                    // (and usually loses to this loop, which runs every frame).
-                    inputReleaseCapture();
-                }
-                break;
-            case SDL_MOUSEBUTTONDOWN:
-                inputNotifyClick();   // WI-1: (re)lock in click-to-lock mode
-                break;
-            case SDL_MOUSEWHEEL:
-                inputPostWheel(event.wheel.y);   // weapon cycle
-                break;
-            case SDL_WINDOWEVENT:
-                if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                    SDL_GL_GetDrawableSize(wnd, &window_width, &window_height);
-                    if (!fullscreen_state) {
-                        maximized_state = SDL_GetWindowFlags(wnd) & SDL_WINDOW_MAXIMIZED ? true : false;
-                    }
-                } else if (event.window.event == SDL_WINDOWEVENT_CLOSE &&
-                           event.window.windowID == SDL_GetWindowID(wnd)) {
-                    // We listen specifically for main window close because closing main window
-                    // on macOS does not trigger SDL_Quit.
-                    exit(0);
-                } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-                    inputSetMouseGrab(0);   // free + show cursor on alt-tab (also handled by video.c's pump; whichever dequeues it)
-                } else if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
-                    inputSetMouseGrab(1);
-                }
-                break;
-            case SDL_QUIT:
-                exit(0);
-                break;
+        if (wayland_backend && getenv("GE_WAYLAND_TRACE_EVENTS") != nullptr) {
+            if (event.type == SDL_WINDOWEVENT) {
+                sysLogPrintf(LOG_NOTE, "WAYLAND_EVENT: window=%u",
+                             (unsigned)event.window.event);
+            } else {
+                sysLogPrintf(LOG_NOTE, "WAYLAND_EVENT: type=%u",
+                             (unsigned)event.type);
+            }
         }
+        if (event.type == SDL_WINDOWEVENT && wayland_backend) {
+            switch (event.window.event) {
+                case SDL_WINDOWEVENT_SHOWN:
+                case SDL_WINDOWEVENT_EXPOSED:
+                case SDL_WINDOWEVENT_RESIZED:
+                case SDL_WINDOWEVENT_SIZE_CHANGED:
+                    geWaylandSurfaceNoteConfigure(&wayland_surface);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        /* Alt+Enter is a window-manager operation owned by this adapter. All
+         * other input/quit/overlay handling has one authority in video.c; the
+         * same handler is called here on Wayland and by the host loop on X11. */
+        if (event.type == SDL_KEYDOWN &&
+            event.key.keysym.sym == SDLK_RETURN &&
+            (event.key.keysym.mod & KMOD_ALT)) {
+            set_fullscreen(!fullscreen_state, true);
+        }
+        videoHandleSdlEvent(&event);
     }
 }
 
 /* The window/context are created on the host main thread, but the game's
- * scheduler thread (shedThread) does all rendering. Make the context current
- * there before each frame. extern "C": called from C (port/src/video.c). */
+ * scheduler thread (shedThread) does all rendering. Transfer the context to
+ * that thread once and keep it current for subsequent frames. extern "C":
+ * called from C (port/src/video.c). */
 extern "C" void gfx_sdl_make_context_current(void) {
-    if (wnd && ctx) {
+    if (wnd && ctx && !render_thread_has_context) {
         /* Note: SDL2's MakeCurrent return value is unreliable on this MinGW
          * toolchain (ABI artifact), so we don't branch on it. A genuine bind
          * failure will surface later as a GL call returning nothing / shader
          * compile failure, which is far louder. */
         SDL_GL_MakeCurrent(wnd, ctx);
+        render_thread_has_context = true;
     }
 }
 
@@ -381,7 +467,84 @@ extern "C" void gfx_sdl_make_context_current(void) {
  * after init so the game's scheduler thread can bind it per frame. */
 extern "C" void gfx_sdl_release_context(void) {
     if (ctx) {
+        if (getenv("GE_DIAG_KEEP_CONTEXT_CURRENT") != nullptr) {
+            render_thread_has_context = true;
+            return;
+        }
         SDL_GL_MakeCurrent(NULL, NULL);
+        render_thread_has_context = false;
+    }
+}
+
+extern "C" int gfx_sdl_host_pumps_events(void) {
+    return host_thread_pumps_events ? 1 : 0;
+}
+
+extern "C" int gfx_sdl_prepare_present(void) {
+    if (wnd == nullptr || ctx == nullptr || !render_thread_has_context) {
+        return 0;
+    }
+
+    if (!window_shown) {
+        SDL_ShowWindow(wnd);
+        window_shown = true;
+        geWaylandSurfaceMarkShown(&wayland_surface);
+    }
+
+    if (wayland_backend && getenv("GE_WAYLAND_SKIP_READINESS") != nullptr) {
+        /* Diagnostic seam: retain the single render-thread event owner while
+         * bypassing the policy wait to isolate SDL/EGL's own configure path. */
+        gfx_sdl_handle_events();
+        return 1;
+    }
+
+    const Uint32 start_ticks = SDL_GetTicks();
+    for (;;) {
+        /* On Wayland this is the only event owner. On X11 it is harmlessly a
+         * backstop for the host pump and preserves the old window behavior. */
+        gfx_sdl_handle_events();
+
+        int drawable_width = 0;
+        int drawable_height = 0;
+        SDL_GL_GetDrawableSize(wnd, &drawable_width, &drawable_height);
+        if (wayland_backend && getenv("GE_WAYLAND_TRACE_PREP") != nullptr &&
+            wayland_trace_prepares < 32) {
+            int logical_width = 0;
+            int logical_height = 0;
+            SDL_GetWindowSize(wnd, &logical_width, &logical_height);
+            sysLogPrintf(LOG_NOTE,
+                         "WAYLAND_PREP: sample=%u drawable=%dx%d "
+                         "logical=%dx%d phase=%d stable=%u configure=%d",
+                         wayland_trace_prepares + 1,
+                         drawable_width, drawable_height,
+                         logical_width, logical_height,
+                         (int)wayland_surface.phase,
+                         wayland_surface.stable_samples,
+                         wayland_surface.configure_seen ? 1 : 0);
+            ++wayland_trace_prepares;
+        }
+        geWaylandSurfaceObserveDrawable(&wayland_surface,
+                                        drawable_width,
+                                        drawable_height);
+        if (geWaylandSurfaceCanPresent(wayland_surface)) {
+            return 1;
+        }
+
+        const unsigned long elapsed_ms =
+            (unsigned long)(SDL_GetTicks() - start_ticks);
+        if (geWaylandSurfaceTimedOut(
+                elapsed_ms, kWaylandSurfaceReadyTimeoutMs)) {
+            sysFatalError(
+                "SDL: window surface did not become presentable within %lu ms "
+                "(backend=%s drawable=%dx%d configure=%d)",
+                kWaylandSurfaceReadyTimeoutMs,
+                wayland_backend ? "wayland" : "non-wayland",
+                drawable_width,
+                drawable_height,
+                wayland_surface.configure_seen ? 1 : 0);
+            return 0;
+        }
+        SDL_Delay(1);
     }
 }
 
@@ -452,6 +615,85 @@ static void gfx_sdl_swap_buffers_begin(void) {
     if (gfx_pre_swap_hook) {
         gfx_pre_swap_hook();
     }
+    /* A Wayland configure can arrive after frame preparation but before the
+     * presentation boundary. Re-run the bounded readiness gate immediately
+     * before the swap so a transient resize never enters EGL with a stale
+     * drawable. */
+    if (wayland_backend && getenv("GE_WAYLAND_SKIP_SWAP_PREP") == nullptr &&
+        !gfx_sdl_prepare_present()) {
+        return;
+    }
+    if (wayland_backend && getenv("GE_WAYLAND_TRACE") != nullptr &&
+        wayland_trace_swaps < 8) {
+        if (getenv("GE_WAYLAND_TRACE_STATE") != nullptr) {
+            GLint draw_fbo = -1;
+            GLint read_fbo = -1;
+            GLint draw_buffer = -1;
+            GLint read_buffer = -1;
+            GLint active_texture = -1;
+            GLint current_program = -1;
+            GLint array_buffer = -1;
+            GLint renderbuffer = -1;
+            GLint texture0 = -1;
+            GLint texture1 = -1;
+            GLint texture2 = -1;
+            GLint viewport[4] = {-1, -1, -1, -1};
+            GLboolean depth_mask = GL_FALSE;
+            int drawable_width = 0;
+            int drawable_height = 0;
+            SDL_GL_GetDrawableSize(wnd, &drawable_width, &drawable_height);
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
+            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
+            glGetIntegerv(GL_DRAW_BUFFER, &draw_buffer);
+            glGetIntegerv(GL_READ_BUFFER, &read_buffer);
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture);
+            glGetIntegerv(GL_CURRENT_PROGRAM, &current_program);
+            glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &array_buffer);
+            glGetIntegerv(GL_RENDERBUFFER_BINDING, &renderbuffer);
+            glActiveTexture(GL_TEXTURE0);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture0);
+            glActiveTexture(GL_TEXTURE1);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture1);
+            glActiveTexture(GL_TEXTURE2);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture2);
+            glActiveTexture((GLenum)active_texture);
+            glGetIntegerv(GL_VIEWPORT, viewport);
+            glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask);
+            const GLenum gl_error = glGetError();
+            const char *gl_vendor = reinterpret_cast<const char *>(
+                glGetString(GL_VENDOR));
+            const char *gl_renderer = reinterpret_cast<const char *>(
+                glGetString(GL_RENDERER));
+            sysLogPrintf(LOG_NOTE,
+                         "WAYLAND_GL_STATE: draw-fbo=%d read-fbo=%d "
+                         "draw=%d read=%d active=%d program=%d "
+                         "array=%d rbo=%d tex=%d,%d,%d depth-mask=%d "
+                         "viewport=%d,%d,%d,%d error=0x%x ctx=%p "
+                         "drawable=%dx%d vendor=%s renderer=%s",
+                         draw_fbo, read_fbo, draw_buffer, read_buffer,
+                         active_texture, current_program,
+                         array_buffer, renderbuffer, texture0, texture1,
+                         texture2, depth_mask ? 1 : 0,
+                         viewport[0], viewport[1], viewport[2], viewport[3],
+                         (unsigned)gl_error,
+                         SDL_GL_GetCurrentContext(),
+                         drawable_width, drawable_height,
+                         gl_vendor != nullptr ? gl_vendor : "unknown",
+                         gl_renderer != nullptr ? gl_renderer : "unknown");
+        }
+        sysLogPrintf(LOG_NOTE,
+                     "WAYLAND_TRACE: swap=%u interval=%d requested=%d error=%s",
+                     wayland_trace_swaps + 1,
+                     SDL_GL_GetSwapInterval(), requested_swap_interval,
+                     SDL_GetError());
+        ++wayland_trace_swaps;
+    }
+    if (wayland_backend && getenv("GE_DIAG_CLAMP_PRESENT_VIEWPORT") != nullptr) {
+        int drawable_width = 0;
+        int drawable_height = 0;
+        SDL_GL_GetDrawableSize(wnd, &drawable_width, &drawable_height);
+        glViewport(0, 0, drawable_width, drawable_height);
+    }
     SDL_GL_SwapWindow(wnd);
 }
 
@@ -481,7 +723,7 @@ static void gfx_sdl_set_target_fps(int fps) {
 }
 
 static bool gfx_sdl_can_disable_vsync(void) {
-    return true;
+    return !wayland_backend;
 }
 
 static void *gfx_sdl_get_window_handle(void) {
@@ -497,10 +739,27 @@ static int gfx_sdl_get_swap_interval(void) {
 }
 
 static bool gfx_sdl_set_swap_interval(int interval) {
-    const bool success = SDL_GL_SetSwapInterval(interval) >= 0;
-    vsync_enabled = success && (interval != 0);
+    const int effective_interval = geWaylandEffectiveSwapInterval(
+        wayland_backend, interval);
+    const int test_interval = getenv("GE_WAYLAND_TEST_SWAP_INTERVAL") != nullptr
+        ? atoi(getenv("GE_WAYLAND_TEST_SWAP_INTERVAL"))
+        : effective_interval;
+    if (effective_interval != interval && !wayland_uncapped_warning_logged) {
+        sysLogPrintf(LOG_WARNING,
+                     "SDL: Wayland does not use an uncapped swap interval; "
+                     "using compositor-paced presentation");
+        wayland_uncapped_warning_logged = true;
+    }
+
+    const bool success = SDL_GL_SetSwapInterval(test_interval) >= 0;
+    vsync_enabled = success && (test_interval != 0);
+    if (success) {
+        requested_swap_interval = test_interval;
+    }
     if (!success) {
-        sysLogPrintf(LOG_WARNING, "SDL: failed to set vsync %d: %s", interval, SDL_GetError());
+        sysLogPrintf(LOG_WARNING,
+                     "SDL: failed to set swap interval requested=%d effective=%d: %s",
+                     interval, test_interval, SDL_GetError());
     }
     return success;
 }

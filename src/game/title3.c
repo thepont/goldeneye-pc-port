@@ -19,6 +19,11 @@ void createGunbarrelRenderHole(struct s_display_list_something *var_s0, s32 arg1
     s16 sinval;
     s32 var_s2;
 
+    if (arg1 <= 0)
+    {
+        return;
+    }
+
     for (var_s2 = 0; var_s2 <= arg1; var_s2 += 2)
     {
         temp_f20 = ((f32) var_s2 * 3.1415927f) / (f32) arg1;
@@ -75,6 +80,12 @@ void createGunbarrelRenderHole(struct s_display_list_something *var_s0, s32 arg1
 Gfx *sub_GAME_7F01BFF8(Gfx *gdl, Vtx *vertexList, s32 numVertices)
 {
     s8 j;
+
+    if (numVertices < 3)
+    {
+        gSPEndDisplayList(gdl++);
+        return gdl;
+    }
     
     do
     {
@@ -98,7 +109,6 @@ Gfx *sub_GAME_7F01BFF8(Gfx *gdl, Vtx *vertexList, s32 numVertices)
 
     return gdl;
 }
-
 
 
 

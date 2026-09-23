@@ -84,6 +84,18 @@ endif()
 # Which ROM the executable expects in the data/ dir.
 set(ROMID "ntsc-final" CACHE STRING "ROM id: ntsc-final (US), pal-final (EU), jpn-final (JP)")
 
+# Coverage is opt-in because instrumentation makes the full executable larger
+# and slower. The unit target is deterministic; the full game target is also
+# instrumented when explicitly requested, but its counters are only useful
+# after a runtime or mocked game-loop harness drives them.
+option(GE007_ENABLE_COVERAGE
+  "Instrument unit tests and the full game target (GCC only)"
+  OFF)
+set(GE007_COVERAGE_MIN_LINES "100" CACHE STRING
+  "Minimum line coverage for required policy files")
+set(GE007_COVERAGE_MIN_BRANCHES "100" CACHE STRING
+  "Minimum branch coverage for required policy files")
+
 # ----------------------------------------------------------------------------
 # Target arch / platform
 # ----------------------------------------------------------------------------
@@ -372,9 +384,9 @@ find_package(SDL2 REQUIRED)
 include_directories(SYSTEM "${SDL2_INCLUDE_DIR}")
 list(APPEND LIBS "${SDL2_LIBRARY}")
 
-# Libre Franklin is loaded at runtime from data/fonts when supplied by the
-# user/package. FreeType is optional so the port still builds on platforms
-# that only ship the original N64 bitmap UI; those builds use that fallback.
+# Science Gothic is packaged under data/fonts for the vector UI path. FreeType
+# is optional so the port still builds on platforms that only ship the
+# original N64 bitmap UI; those builds use that fallback.
 find_package(Freetype QUIET)
 if(FREETYPE_FOUND)
   include_directories(SYSTEM "${FREETYPE_INCLUDE_DIRS}")
@@ -389,6 +401,9 @@ if(ZLIB_INCLUDE_DIR)
   include_directories(SYSTEM "${ZLIB_INCLUDE_DIR}")
 endif()
 list(APPEND LIBS "${ZLIB_LIBRARY}")
+
+find_package(PNG REQUIRED)
+list(APPEND LIBS PNG::PNG)
 
 # Real <zlib.h> for port/src/rzdecomp.c (which backs decompressdata() with real
 # zlib). The game's own src/game/zlib.h sits on the -I path and shadows a plain
@@ -609,10 +624,37 @@ set(SRC
 # ----------------------------------------------------------------------------
 set(BIN_NAME "ge007${BIN_REGION}.${TARGET_ARCH}")
 add_executable(ge007 ${SRC})
+target_include_directories(ge007 PRIVATE
+  "${CMAKE_SOURCE_DIR}/port/fast3d")
 target_link_libraries(ge007 ${LIBS})
 set_target_properties(ge007 PROPERTIES OUTPUT_NAME "${BIN_NAME}")
 if(WIN32)
   set_target_properties(ge007 PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
+if(GE007_ENABLE_COVERAGE)
+  if(NOT CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
+     NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    message(FATAL_ERROR
+      "GE007_ENABLE_COVERAGE currently requires the GNU C/C++ toolchain")
+  endif()
+
+  find_program(GE007_GCOV_EXECUTABLE NAMES gcov)
+  if(NOT GE007_GCOV_EXECUTABLE)
+    message(FATAL_ERROR
+      "GE007_ENABLE_COVERAGE requires gcov, but it was not found")
+  endif()
+
+  # This is deliberately applied to the complete executable target. In
+  # particular, every src/game/*.c translation unit receives gcno counters;
+  # the unit gate below remains separate because unit tests cannot exercise
+  # the live game loop.
+  target_compile_options(ge007 PRIVATE --coverage -O0 -g)
+  target_link_options(ge007 PRIVATE --coverage)
+
+  add_custom_target(ge007_game_coverage
+    DEPENDS ge007
+    COMMENT "Built instrumented ge007; run the runtime harness to collect game coverage")
 endif()
 
 if(BUILD_TESTING)
@@ -621,6 +663,351 @@ if(BUILD_TESTING)
   target_compile_features(ge007_dynamic_lighting_test PRIVATE cxx_std_20)
   add_test(NAME ge007_dynamic_lighting
            COMMAND ge007_dynamic_lighting_test)
+
+  add_executable(ge007_explosion_effect_test
+    tests/explosion_effect_test.cpp)
+  target_compile_features(ge007_explosion_effect_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_explosion_effect
+           COMMAND ge007_explosion_effect_test)
+
+  add_executable(ge007_vector_text_frame_test
+    tests/vector_text_frame_test.cpp)
+  target_compile_features(ge007_vector_text_frame_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_vector_text_frame
+           COMMAND ge007_vector_text_frame_test)
+
+  add_executable(ge007_vector_text_font_assets_test
+    tests/vector_text_font_assets_test.cpp)
+  target_compile_features(ge007_vector_text_font_assets_test PRIVATE cxx_std_20)
+  target_compile_definitions(ge007_vector_text_font_assets_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  if(FREETYPE_FOUND)
+    target_compile_definitions(ge007_vector_text_font_assets_test PRIVATE
+      GE007_HAVE_FREETYPE_TEST=1)
+    target_include_directories(ge007_vector_text_font_assets_test PRIVATE
+      SYSTEM "${FREETYPE_INCLUDE_DIRS}")
+    target_link_libraries(ge007_vector_text_font_assets_test PRIVATE
+      "${FREETYPE_LIBRARIES}")
+  endif()
+  add_test(NAME ge007_vector_text_font_assets
+           COMMAND ge007_vector_text_font_assets_test)
+
+  add_executable(ge007_vector_text_route_test
+    tests/vector_text_route_test.cpp)
+  target_compile_features(ge007_vector_text_route_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_vector_text_route
+           COMMAND ge007_vector_text_route_test)
+
+  add_executable(ge007_bump_mapping_policy_test
+    tests/bump_mapping_policy_test.cpp)
+  target_compile_features(ge007_bump_mapping_policy_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_bump_mapping_policy
+           COMMAND ge007_bump_mapping_policy_test)
+
+  add_executable(ge007_textured_vertex_stream_policy_test
+    tests/textured_vertex_stream_policy_test.cpp)
+  target_compile_definitions(ge007_textured_vertex_stream_policy_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  target_compile_features(ge007_textured_vertex_stream_policy_test PRIVATE
+    cxx_std_20)
+  add_test(NAME ge007_textured_vertex_stream_policy
+           COMMAND ge007_textured_vertex_stream_policy_test)
+
+  add_executable(ge007_fast3d_light_state_test
+    tests/fast3d_light_state_test.cpp)
+  target_include_directories(ge007_fast3d_light_state_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d"
+    "${CMAKE_SOURCE_DIR}/include")
+  target_compile_features(ge007_fast3d_light_state_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_fast3d_light_state
+           COMMAND ge007_fast3d_light_state_test)
+
+  add_executable(ge007_fast3d_normal_policy_test
+    tests/fast3d_normal_policy_test.cpp)
+  target_include_directories(ge007_fast3d_normal_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_fast3d_normal_policy_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_fast3d_normal_policy
+           COMMAND ge007_fast3d_normal_policy_test)
+
+  add_executable(ge007_bumpmap_generator_policy_test
+    tests/bumpmap_generator_policy_test.cpp)
+  target_include_directories(ge007_bumpmap_generator_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/tools/mktex/src")
+  target_compile_features(ge007_bumpmap_generator_policy_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_bumpmap_generator_policy
+           COMMAND ge007_bumpmap_generator_policy_test)
+
+  add_executable(ge007_bumpmap_decode_test
+    tests/bumpmap_decode_test.cpp
+    "${CMAKE_SOURCE_DIR}/tools/mktex/src/bumpmap_decode.c")
+  target_include_directories(ge007_bumpmap_decode_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/tools/mktex/src")
+  target_compile_features(ge007_bumpmap_decode_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_bumpmap_decode
+           COMMAND ge007_bumpmap_decode_test)
+
+  add_executable(ge007_bumpmap_metadata_test
+    tests/bumpmap_metadata_test.cpp
+    "${CMAKE_SOURCE_DIR}/tools/mktex/src/bumpmap_metadata.c")
+  target_include_directories(ge007_bumpmap_metadata_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/tools/mktex/src")
+  target_compile_features(ge007_bumpmap_metadata_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_bumpmap_metadata
+           COMMAND ge007_bumpmap_metadata_test)
+
+  add_executable(ge007_pdtex_stream_test
+    tests/pdtex_stream_test.cpp
+    "${CMAKE_SOURCE_DIR}/tools/mktex/src/libpdtex/pdtex.c")
+  target_include_directories(ge007_pdtex_stream_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/tools/mktex/src")
+  target_compile_features(ge007_pdtex_stream_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_pdtex_stream
+           COMMAND ge007_pdtex_stream_test)
+
+  add_executable(ge007_bumpmap_runtime_test
+    tests/bumpmap_runtime_test.cpp
+    "${CMAKE_SOURCE_DIR}/port/fast3d/bumpmap_runtime.cpp")
+  target_include_directories(ge007_bumpmap_runtime_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_definitions(ge007_bumpmap_runtime_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  target_compile_features(ge007_bumpmap_runtime_test PRIVATE cxx_std_20)
+  target_link_libraries(ge007_bumpmap_runtime_test PRIVATE PNG::PNG)
+  add_test(NAME ge007_bumpmap_runtime
+           COMMAND ge007_bumpmap_runtime_test)
+
+  add_executable(ge007_depth_of_field_policy_test
+    tests/depth_of_field_policy_test.cpp)
+  target_include_directories(ge007_depth_of_field_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_depth_of_field_policy_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_depth_of_field_policy
+           COMMAND ge007_depth_of_field_policy_test)
+
+  add_executable(ge007_gfx_wayland_surface_policy_test
+    tests/gfx_wayland_surface_policy_test.cpp)
+  target_include_directories(ge007_gfx_wayland_surface_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_gfx_wayland_surface_policy_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_gfx_wayland_surface_policy
+           COMMAND ge007_gfx_wayland_surface_policy_test)
+
+  add_executable(ge007_ascension_postfx_shader_test
+    tests/ascension_postfx_shader_test.cpp
+    port/fast3d/glad/glad.c)
+  target_compile_features(ge007_ascension_postfx_shader_test PRIVATE cxx_std_20)
+  target_compile_definitions(ge007_ascension_postfx_shader_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  target_link_libraries(ge007_ascension_postfx_shader_test PRIVATE
+    "${SDL2_LIBRARY}" "${GL_LIBRARY}")
+  add_test(NAME ge007_ascension_postfx_shader_contract
+           COMMAND ge007_ascension_postfx_shader_test)
+  set_tests_properties(ge007_ascension_postfx_shader_contract
+    PROPERTIES LABELS "ge007-unit;ge007-shader")
+
+  find_program(GE007_GLSLANG_VALIDATOR NAMES glslangValidator)
+  if(GE007_GLSLANG_VALIDATOR)
+    add_test(NAME ge007_ascension_postfx_shader_compile
+             COMMAND ge007_ascension_postfx_shader_test --compile
+                     "${GE007_GLSLANG_VALIDATOR}")
+    set_tests_properties(ge007_ascension_postfx_shader_compile
+      PROPERTIES LABELS "ge007-unit;ge007-shader")
+  else()
+    message(STATUS
+      "glslangValidator not found: PostFX shader compiler test will be omitted")
+  endif()
+
+  find_program(GE007_XVFB NAMES Xvfb)
+  if(GE007_XVFB)
+    add_test(NAME ge007_ascension_postfx_gpu
+             COMMAND bash "${CMAKE_SOURCE_DIR}/tests/run_headless_gl.sh"
+                     "${GE007_XVFB}"
+                     $<TARGET_FILE:ge007_ascension_postfx_shader_test> --gpu)
+    set_tests_properties(ge007_ascension_postfx_gpu
+      PROPERTIES
+        LABELS ge007-gpu
+        ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;SDL_VIDEODRIVER=x11"
+        SKIP_RETURN_CODE 77)
+  else()
+    message(STATUS
+      "Xvfb not found: headless PostFX GPU test will be omitted")
+  endif()
+
+  add_executable(ge007_world_lighting_integration_test
+    tests/world_lighting_integration_test.c
+    port/src/world_lighting.c)
+  add_test(NAME ge007_world_lighting_integration
+           COMMAND ge007_world_lighting_integration_test)
+
+  add_executable(ge007_gu_matrix_test
+    tests/gu_matrix_test.cpp
+    src/libultra/gu/rotate.c
+    src/libultra/gu/scale.c
+    src/libultra/gu/translate.c
+    src/libultra/gu/ortho.c
+    src/libultra/gu/perspective.c
+    src/libultra/gu/lookat.c
+    src/libultra/gu/sins.c
+    src/libultra/gu/coss.c
+    src/libultra/gu/mtxutil.c
+    src/libultra/gu/normalize.c
+    src/libultra/gu/align.c)
+  target_compile_features(ge007_gu_matrix_test PRIVATE cxx_std_20)
+  if(UNIX)
+    target_link_libraries(ge007_gu_matrix_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_gu_matrix
+           COMMAND ge007_gu_matrix_test)
+
+  add_executable(ge007_matrixmath_test
+    tests/matrixmath_test.cpp
+    src/game/matrixmath.c
+    src/game/matrixmath_misc.c
+    src/libultra/gu/normalize.c
+    src/libultra/gu/align.c
+    src/libultra/gu/mtxutil.c)
+  target_compile_features(ge007_matrixmath_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_matrixmath
+           COMMAND ge007_matrixmath_test)
+
+  add_executable(ge007_game_math_test
+    tests/game_math_test.cpp
+    src/game/math_asinacos.c
+    src/game/math_asinfacosf.c
+    src/game/math_atan2f.c
+    src/game/math_ceil.c
+    src/game/math_floor.c
+    src/game/math_unk_05A9E0.c
+    src/game/quaternion.c)
+  target_compile_features(ge007_game_math_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_game_math
+           COMMAND ge007_game_math_test)
+
+  add_executable(ge007_geometry_test
+    tests/geometry_test.cpp
+    src/game/stanintersection.c)
+  target_compile_features(ge007_geometry_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_geometry
+           COMMAND ge007_geometry_test)
+
+  add_executable(ge007_rle_test
+    tests/rle_test.cpp
+    src/game/rle.c)
+  target_compile_features(ge007_rle_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_rle
+           COMMAND ge007_rle_test)
+
+  add_executable(ge007_line_tri_intersect_test
+    tests/line_tri_intersect_test.cpp
+    src/game/line_tri_intersect.c)
+  target_compile_features(ge007_line_tri_intersect_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_line_tri_intersect
+           COMMAND ge007_line_tri_intersect_test)
+
+  add_executable(ge007_blood_decrypt_test
+    tests/blood_decrypt_test.cpp
+    src/game/blood_decrypt.c)
+  target_compile_features(ge007_blood_decrypt_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_blood_decrypt
+           COMMAND ge007_blood_decrypt_test)
+
+  add_executable(ge007_blood_animation_test
+    tests/blood_animation_test.c
+    src/game/blood_animation.c)
+  target_compile_features(ge007_blood_animation_test PRIVATE c_std_11)
+  target_compile_options(ge007_blood_animation_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_blood_animation_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_blood_animation
+           COMMAND ge007_blood_animation_test)
+
+  add_executable(ge007_rzdecomp_test
+    tests/rzdecomp_test.cpp
+    port/src/rzdecomp.c)
+  target_compile_features(ge007_rzdecomp_test PRIVATE cxx_std_20)
+  target_link_libraries(ge007_rzdecomp_test PRIVATE ZLIB::ZLIB)
+  add_test(NAME ge007_rzdecomp
+           COMMAND ge007_rzdecomp_test)
+
+  add_executable(ge007_zlib_inflate_test
+    tests/zlib_inflate_test.cpp
+    src/game/zlib.c)
+  target_compile_features(ge007_zlib_inflate_test PRIVATE cxx_std_20)
+  target_compile_options(ge007_zlib_inflate_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_zlib_inflate_test PRIVATE
+    -Wl,--gc-sections)
+  target_link_libraries(ge007_zlib_inflate_test PRIVATE ZLIB::ZLIB)
+  add_test(NAME ge007_zlib_inflate
+           COMMAND ge007_zlib_inflate_test)
+
+  add_executable(ge007_crc_test
+    tests/crc_test.cpp
+    src/game/crc.c
+    port/src/random.c)
+  target_compile_features(ge007_crc_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_crc
+           COMMAND ge007_crc_test)
+
+  add_executable(ge007_objective_status2_test
+    tests/objective_status2_test.cpp
+    src/game/objective_status2.c)
+  target_compile_features(ge007_objective_status2_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_objective_status2
+           COMMAND ge007_objective_status2_test)
+
+  add_executable(ge007_objective_test
+    tests/objective_test.cpp
+    src/game/objective.c
+    src/game/objective_status.c)
+  target_compile_features(ge007_objective_test PRIVATE cxx_std_20)
+  target_compile_options(ge007_objective_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_objective_test PRIVATE -Wl,--gc-sections)
+  add_test(NAME ge007_objective
+           COMMAND ge007_objective_test)
+
+  add_executable(ge007_loadobjectmodel_test
+    tests/loadobjectmodel_test.cpp
+    src/game/loadobjectmodel.c)
+  target_compile_features(ge007_loadobjectmodel_test PRIVATE cxx_std_20)
+  target_compile_options(ge007_loadobjectmodel_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_loadobjectmodel_test PRIVATE -Wl,--gc-sections)
+  add_test(NAME ge007_loadobjectmodel
+           COMMAND ge007_loadobjectmodel_test)
+
+  add_executable(ge007_cctv_orientation_test
+    tests/cctv_orientation_test.cpp
+    src/game/cctv.c)
+  target_compile_features(ge007_cctv_orientation_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_cctv_orientation
+           COMMAND ge007_cctv_orientation_test)
+
+  add_executable(ge007_bondview_r_coop_spawn_test
+    tests/bondview_r_coop_spawn_test.c
+    port/src/coop.c)
+  target_compile_options(ge007_bondview_r_coop_spawn_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_bondview_r_coop_spawn_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_bondview_r_coop_spawn
+           COMMAND ge007_bondview_r_coop_spawn_test)
+
+  add_executable(ge007_record_damage_kills_test
+    tests/record_damage_kills_test.c
+    src/game/bondview2.c)
+  target_compile_options(ge007_record_damage_kills_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_record_damage_kills_test PRIVATE
+    -Wl,--gc-sections -Wl,--wrap=bondviewKillCurrentPlayer)
+  if(UNIX)
+    target_link_libraries(ge007_record_damage_kills_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_record_damage_kills
+           COMMAND ge007_record_damage_kills_test)
 
   add_executable(ge007_coop_test
     tests/coop_test.cpp
@@ -668,10 +1055,1524 @@ if(BUILD_TESTING)
   add_test(NAME ge007_viewport_policy
            COMMAND ge007_viewport_policy_test)
 
+  add_executable(ge007_defect_contract_test
+    tests/defect_contract_test.cpp)
+  target_include_directories(ge007_defect_contract_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  add_test(NAME ge007_defect_contract
+           COMMAND ge007_defect_contract_test)
+
+  add_executable(ge007_ambient_lighting_regression_test
+    tests/ambient_lighting_regression_test.cpp)
+  target_compile_definitions(ge007_ambient_lighting_regression_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  target_compile_features(ge007_ambient_lighting_regression_test PRIVATE
+    cxx_std_20)
+  add_test(NAME ge007_ambient_lighting_regression
+           COMMAND ge007_ambient_lighting_regression_test)
+
+  add_executable(ge007_water_render_policy_test
+    tests/water_render_policy_test.cpp)
+  target_include_directories(ge007_water_render_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  add_test(NAME ge007_water_render_policy
+           COMMAND ge007_water_render_policy_test)
+
+  add_executable(ge007_water_render_reference_math_test
+    tests/water_render_reference_math_test.cpp)
+  target_include_directories(ge007_water_render_reference_math_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  target_compile_features(ge007_water_render_reference_math_test PRIVATE
+    cxx_std_20)
+  add_test(NAME ge007_water_render_reference_math
+           COMMAND ge007_water_render_reference_math_test)
+
+  add_executable(ge007_water_time_policy_test
+    tests/water_time_policy_test.cpp)
+  target_include_directories(ge007_water_time_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  target_compile_features(ge007_water_time_policy_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_water_time_policy
+           COMMAND ge007_water_time_policy_test)
+
+  add_executable(ge007_water_heightfield_policy_test
+    tests/water_heightfield_policy_test.cpp)
+  target_include_directories(ge007_water_heightfield_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  target_compile_features(ge007_water_heightfield_policy_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_water_heightfield_policy
+           COMMAND ge007_water_heightfield_policy_test)
+
+  add_executable(ge007_water_heightfield_integration_contract_test
+    tests/water_heightfield_integration_contract_test.cpp)
+  target_compile_definitions(ge007_water_heightfield_integration_contract_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  target_compile_features(ge007_water_heightfield_integration_contract_test PRIVATE
+    cxx_std_20)
+  target_include_directories(ge007_water_heightfield_integration_contract_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/tests")
+  add_test(NAME ge007_water_heightfield_integration_contract
+           COMMAND ge007_water_heightfield_integration_contract_test)
+
+  add_executable(ge007_water_live_shader_contract_test
+    tests/water_live_shader_contract_test.cpp)
+  target_compile_definitions(ge007_water_live_shader_contract_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  target_compile_features(ge007_water_live_shader_contract_test PRIVATE
+    cxx_std_20)
+  target_include_directories(ge007_water_live_shader_contract_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/tests")
+  add_test(NAME ge007_water_live_shader_contract
+           COMMAND ge007_water_live_shader_contract_test)
+
+  add_executable(ge007_water_cpu_render_harness_test
+    tests/water_cpu_render_harness_test.cpp)
+  target_include_directories(ge007_water_cpu_render_harness_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include"
+    "${CMAKE_SOURCE_DIR}/tests")
+  target_compile_features(ge007_water_cpu_render_harness_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_water_cpu_render_harness
+           COMMAND ge007_water_cpu_render_harness_test --self-test)
+
+  add_executable(ge007_water_render_pixel_oracle_test
+    tests/water_render_pixel_oracle_test.cpp)
+  target_include_directories(ge007_water_render_pixel_oracle_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/tests")
+  target_compile_features(ge007_water_render_pixel_oracle_test PRIVATE
+    cxx_std_17)
+  add_test(NAME ge007_water_render_pixel_oracle
+           COMMAND ge007_water_render_pixel_oracle_test --self-test)
+
+  add_executable(ge007_water_render_quality_contract_test
+    tests/water_render_quality_contract_test.cpp)
+  target_include_directories(ge007_water_render_quality_contract_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_definitions(ge007_water_render_quality_contract_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  target_compile_features(ge007_water_render_quality_contract_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_water_render_quality_contract
+           COMMAND ge007_water_render_quality_contract_test)
+
+  add_executable(ge007_water_render_bdd_contract_test
+    tests/water_render_bdd_contract_test.cpp)
+  target_compile_features(ge007_water_render_bdd_contract_test PRIVATE
+    cxx_std_20)
+  target_compile_definitions(ge007_water_render_bdd_contract_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  add_test(NAME ge007_water_render_bdd_contract
+           COMMAND ge007_water_render_bdd_contract_test)
+
+  add_executable(ge007_water_render_missed_contract_test
+    tests/water_render_missed_contract_test.cpp)
+  target_compile_features(ge007_water_render_missed_contract_test PRIVATE
+    cxx_std_20)
+  target_compile_definitions(ge007_water_render_missed_contract_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  add_test(NAME ge007_water_render_missed_contract
+           COMMAND ge007_water_render_missed_contract_test)
+
+  add_executable(ge007_world_water_surface_contract_test
+    tests/world_water_surface_contract_test.cpp)
+  target_compile_features(ge007_world_water_surface_contract_test PRIVATE
+    cxx_std_20)
+  target_compile_definitions(ge007_world_water_surface_contract_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  add_test(NAME ge007_world_water_surface_contract
+           COMMAND ge007_world_water_surface_contract_test)
+
+  add_executable(ge007_muzzle_flash_contract_test
+    tests/muzzle_flash_contract_test.cpp
+    src/game/matrixmath.c
+    src/game/matrixmath_misc.c
+    src/libultra/gu/normalize.c
+    src/libultra/gu/align.c
+    src/libultra/gu/mtxutil.c)
+  target_include_directories(ge007_muzzle_flash_contract_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/include")
+  add_test(NAME ge007_muzzle_flash_contract
+           COMMAND ge007_muzzle_flash_contract_test)
+
+  add_executable(ge007_game_utility_edge_test
+    tests/game_utility_edge_test.c
+    src/game/cleanup_alarms.c
+    src/game/cleanup_objectives.c
+    src/game/cleanwindowpieces.c
+    src/game/compiletime.c
+    src/game/initnull_0009D0.c
+    src/game/initnull_000BC0.c
+    src/game/mp_weapon.c
+    src/game/null_007970.c
+    src/game/padhalllv.c
+    src/game/setguscale.c)
+  target_compile_features(ge007_game_utility_edge_test PRIVATE c_std_11)
+  target_compile_options(ge007_game_utility_edge_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_game_utility_edge_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_game_utility_edge
+           COMMAND ge007_game_utility_edge_test)
+
+  add_executable(ge007_bondhead_test
+    tests/bondhead_test.c
+    src/game/bondhead.c)
+  target_compile_features(ge007_bondhead_test PRIVATE c_std_11)
+  target_compile_options(ge007_bondhead_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_bondhead_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_bondhead
+           COMMAND ge007_bondhead_test)
+
+  add_executable(ge007_music_tracks_test
+    tests/music_tracks_test.c
+    src/game/music_0D2720.c)
+  target_compile_features(ge007_music_tracks_test PRIVATE c_std_11)
+  target_compile_options(ge007_music_tracks_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_music_tracks_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_music_tracks
+           COMMAND ge007_music_tracks_test)
+
+  add_executable(ge007_bgfog_test
+    tests/bgfog_test.c
+    src/game/bgfog.c)
+  target_compile_features(ge007_bgfog_test PRIVATE c_std_11)
+  target_compile_options(ge007_bgfog_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_bgfog_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_bgfog
+           COMMAND ge007_bgfog_test)
+
+  add_executable(ge007_bg_apply_lut_test
+    tests/bg_apply_lut_test.c
+    src/game/bgapply.c)
+  target_compile_features(ge007_bg_apply_lut_test PRIVATE c_std_11)
+  target_compile_options(ge007_bg_apply_lut_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_bg_apply_lut_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_bg_apply_lut
+           COMMAND ge007_bg_apply_lut_test)
+
+  add_executable(ge007_bg_room_trans_test
+    tests/bg_room_trans_test.c
+    src/game/bgroomtrans.c)
+  target_compile_features(ge007_bg_room_trans_test PRIVATE c_std_11)
+  target_compile_options(ge007_bg_room_trans_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_bg_room_trans_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_bg_room_trans_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_bg_room_trans
+           COMMAND ge007_bg_room_trans_test)
+
+  add_executable(ge007_file_state_test
+    tests/file_state_test.c
+    src/game/file.c)
+  target_compile_features(ge007_file_state_test PRIVATE c_std_11)
+  target_compile_options(ge007_file_state_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_file_state_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_file_state
+           COMMAND ge007_file_state_test)
+
+  add_executable(ge007_file2_handler_test
+    tests/file2_handler_test.c
+    src/game/file2.c)
+  target_compile_features(ge007_file2_handler_test PRIVATE c_std_11)
+  target_compile_options(ge007_file2_handler_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_file2_handler_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_file2_handler
+           COMMAND ge007_file2_handler_test)
+
+  add_executable(ge007_ob_resource_test
+    tests/ob_resource_test.c
+    src/game/ob.c
+    ${SRC_ROMASSETS})
+  target_compile_features(ge007_ob_resource_test PRIVATE c_std_11)
+  target_compile_options(ge007_ob_resource_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_ob_resource_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_ob_resource
+           COMMAND ge007_ob_resource_test)
+
+  add_executable(ge007_objecthandler2_test
+    tests/objecthandler2_test.c
+    src/game/objecthandler_2.c)
+  target_compile_features(ge007_objecthandler2_test PRIVATE c_std_11)
+  target_compile_options(ge007_objecthandler2_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_objecthandler2_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_objecthandler2
+           COMMAND ge007_objecthandler2_test)
+
+  add_executable(ge007_model_pointer_promotion_test
+    tests/model_pointer_promotion_test.c
+    src/game/model.c)
+  target_compile_features(ge007_model_pointer_promotion_test PRIVATE c_std_11)
+  target_compile_options(ge007_model_pointer_promotion_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_model_pointer_promotion_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_model_pointer_promotion
+           COMMAND ge007_model_pointer_promotion_test)
+
+  add_executable(ge007_model_animation_test
+    tests/model_animation_test.c
+    src/game/model.c
+    src/game/math_ceil.c)
+  target_compile_features(ge007_model_animation_test PRIVATE c_std_11)
+  target_compile_options(ge007_model_animation_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_model_animation_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_model_animation
+           COMMAND ge007_model_animation_test)
+
+  add_executable(ge007_tex_policy_test
+    tests/tex_policy_test.c
+    src/game/tex.c)
+  target_compile_features(ge007_tex_policy_test PRIVATE c_std_11)
+  target_compile_options(ge007_tex_policy_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_tex_policy_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_tex_policy
+           COMMAND ge007_tex_policy_test)
+
+  add_executable(ge007_image_texture_test
+    tests/image_texture_test.c
+    src/game/image.c
+    src/game/image_bank.c)
+  target_include_directories(ge007_image_texture_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_image_texture_test PRIVATE c_std_11)
+  target_compile_options(ge007_image_texture_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_image_texture_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_image_texture
+           COMMAND ge007_image_texture_test)
+
+  add_executable(ge007_image_bank_test
+    tests/image_bank_test.c
+    src/game/image_bank.c)
+  target_include_directories(ge007_image_bank_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_image_bank_test PRIVATE c_std_11)
+  target_compile_options(ge007_image_bank_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_image_bank_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_image_bank
+           COMMAND ge007_image_bank_test)
+
+  add_executable(ge007_chr_b_test
+    tests/chr_b_test.c
+    src/game/chr_b.c)
+  target_include_directories(ge007_chr_b_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_chr_b_test PRIVATE c_std_11)
+  target_compile_options(ge007_chr_b_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_chr_b_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_chr_b
+           COMMAND ge007_chr_b_test)
+
+  add_executable(ge007_initanitable_test
+    tests/initanitable_test.c
+    src/game/initanitable.c)
+  target_include_directories(ge007_initanitable_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_initanitable_test PRIVATE c_std_11)
+  target_compile_options(ge007_initanitable_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_initanitable_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_initanitable
+           COMMAND ge007_initanitable_test)
+
+  add_executable(ge007_deb_loadallmodels_test
+    tests/deb_loadallmodels_test.c
+    src/game/deb_loadallmodels.c)
+  target_include_directories(ge007_deb_loadallmodels_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_deb_loadallmodels_test PRIVATE c_std_11)
+  target_compile_options(ge007_deb_loadallmodels_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_deb_loadallmodels_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_deb_loadallmodels
+           COMMAND ge007_deb_loadallmodels_test)
+
+  add_executable(ge007_init_bond_data_defaults_test
+    tests/initBondDATAdefaults_test.c
+    src/game/initBondDATAdefaults.c)
+  target_include_directories(ge007_init_bond_data_defaults_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_init_bond_data_defaults_test PRIVATE c_std_11)
+  target_compile_options(ge007_init_bond_data_defaults_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_init_bond_data_defaults_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_init_bond_data_defaults
+           COMMAND ge007_init_bond_data_defaults_test)
+
+  add_executable(ge007_init_actor_propstuff_test
+    tests/initactorpropstuff_test.c
+    src/game/initactorpropstuff.c)
+  target_include_directories(ge007_init_actor_propstuff_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_init_actor_propstuff_test PRIVATE c_std_11)
+  target_compile_options(ge007_init_actor_propstuff_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_init_actor_propstuff_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_init_actor_propstuff
+           COMMAND ge007_init_actor_propstuff_test)
+
+  add_executable(ge007_init_bond_data_test
+    tests/initBondDATA_test.c
+    src/game/initBondDATA.c)
+  target_include_directories(ge007_init_bond_data_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_init_bond_data_test PRIVATE c_std_11)
+  target_compile_options(ge007_init_bond_data_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_init_bond_data_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_init_bond_data
+           COMMAND ge007_init_bond_data_test)
+
+  add_executable(ge007_unk_092e50_test
+    tests/unk_092E50_test.c
+    src/game/unk_092E50.c)
+  target_include_directories(ge007_unk_092e50_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_unk_092e50_test PRIVATE c_std_11)
+  target_compile_options(ge007_unk_092e50_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_unk_092e50_test PRIVATE
+    -Wl,--gc-sections)
+  target_link_libraries(ge007_unk_092e50_test PRIVATE m)
+  add_test(NAME ge007_unk_092e50
+           COMMAND ge007_unk_092e50_test)
+
+  add_executable(ge007_glass_test
+    tests/glass_test.c
+    src/game/glass.c)
+  target_include_directories(ge007_glass_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_glass_test PRIVATE c_std_11)
+  target_compile_options(ge007_glass_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_glass_test PRIVATE
+    -Wl,--gc-sections)
+  target_link_libraries(ge007_glass_test PRIVATE m)
+  add_test(NAME ge007_glass
+           COMMAND ge007_glass_test)
+
+  add_executable(ge007_glass2_test
+    tests/glass2_test.c
+    src/game/glass2.c)
+  target_include_directories(ge007_glass2_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_glass2_test PRIVATE c_std_11)
+  target_compile_options(ge007_glass2_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_glass2_test PRIVATE
+    -Wl,--gc-sections)
+  target_link_libraries(ge007_glass2_test PRIVATE m)
+  add_test(NAME ge007_glass2
+           COMMAND ge007_glass2_test)
+
+  add_executable(ge007_debugmenu_navigation_test
+    tests/debugmenu_navigation_test.c
+    src/game/debugmenu_08FE00.c)
+  target_compile_features(ge007_debugmenu_navigation_test PRIVATE c_std_11)
+  target_compile_options(ge007_debugmenu_navigation_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_debugmenu_navigation_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_debugmenu_navigation
+           COMMAND ge007_debugmenu_navigation_test)
+
+  add_executable(ge007_bondinv_test
+    tests/bondinv_test.c
+    src/game/bondinv.c)
+  target_include_directories(ge007_bondinv_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_bondinv_test PRIVATE c_std_11)
+  target_compile_options(ge007_bondinv_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_bondinv_test PRIVATE
+    -Wl,--gc-sections)
+  target_link_libraries(ge007_bondinv_test PRIVATE m)
+  add_test(NAME ge007_bondinv
+           COMMAND ge007_bondinv_test)
+
+  add_executable(ge007_textrelated_policy_test
+    tests/textrelated_policy_test.c
+    src/game/textrelated.c)
+  target_include_directories(ge007_textrelated_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_textrelated_policy_test PRIVATE c_std_11)
+  target_compile_options(ge007_textrelated_policy_test PRIVATE
+    -ffunction-sections -fdata-sections
+    -fsanitize=address -fno-omit-frame-pointer)
+  target_link_options(ge007_textrelated_policy_test PRIVATE
+    -Wl,--gc-sections
+    -fsanitize=address)
+  add_test(NAME ge007_textrelated_policy
+           COMMAND ge007_textrelated_policy_test)
+  set_tests_properties(ge007_textrelated_policy
+    PROPERTIES ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+
+  add_executable(ge007_sky_policy_test
+    tests/sky_policy_test.c
+    src/game/sky.c)
+  target_compile_features(ge007_sky_policy_test PRIVATE c_std_11)
+  target_compile_options(ge007_sky_policy_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_sky_policy_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_sky_policy_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_sky_policy
+           COMMAND ge007_sky_policy_test)
+
+  add_executable(ge007_lightfixture_test
+    tests/lightfixture_test.c
+    src/game/lightfixture.c)
+  target_compile_features(ge007_lightfixture_test PRIVATE c_std_11)
+  target_compile_options(ge007_lightfixture_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_lightfixture_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_lightfixture_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_lightfixture
+           COMMAND ge007_lightfixture_test)
+
+  add_executable(ge007_vtxstore_test
+    tests/vtxstore_test.c
+    src/game/vtxstore.c)
+  target_compile_features(ge007_vtxstore_test PRIVATE c_std_11)
+  target_compile_options(ge007_vtxstore_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_vtxstore_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_vtxstore
+           COMMAND ge007_vtxstore_test)
+
+  add_executable(ge007_debug_camera_test
+    tests/debug_camera_test.c
+    src/game/debug_camera.c)
+  target_compile_features(ge007_debug_camera_test PRIVATE c_std_11)
+  target_compile_definitions(ge007_debug_camera_test PRIVATE
+    GE007_DEBUG_CAMERA_TEST)
+  target_compile_options(ge007_debug_camera_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_debug_camera_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_debug_camera_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_debug_camera
+           COMMAND ge007_debug_camera_test)
+
+  add_executable(ge007_title3_display_list_test
+    tests/title3_display_list_test.c
+    src/game/title3.c)
+  target_compile_features(ge007_title3_display_list_test PRIVATE c_std_11)
+  target_compile_options(ge007_title3_display_list_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_title3_display_list_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_title3_display_list_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_title3_display_list
+           COMMAND ge007_title3_display_list_test)
+
+  add_executable(ge007_title2_display_list_test
+    tests/title2_display_list_test.c
+    src/game/title2.c)
+  target_compile_features(ge007_title2_display_list_test PRIVATE c_std_11)
+  target_compile_options(ge007_title2_display_list_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_title2_display_list_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_title2_display_list
+           COMMAND ge007_title2_display_list_test)
+
+  add_executable(ge007_indy_comms_test
+    tests/indy_comms_test.c
+    src/game/indy_comms.c)
+  target_compile_features(ge007_indy_comms_test PRIVATE c_std_11)
+  target_compile_options(ge007_indy_comms_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_indy_comms_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_indy_comms
+           COMMAND ge007_indy_comms_test)
+
+  add_executable(ge007_bondwalk2_display_test
+    tests/bondwalk2_display_test.c
+    src/game/bondwalk2.c)
+  target_compile_features(ge007_bondwalk2_display_test PRIVATE c_std_11)
+  target_compile_options(ge007_bondwalk2_display_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_bondwalk2_display_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_bondwalk2_display
+           COMMAND ge007_bondwalk2_display_test)
+
+  add_executable(ge007_speedgraphrenderer_test
+    tests/speedgraphrenderer_test.c
+    src/game/speedgraphrenderer.c)
+  target_compile_features(ge007_speedgraphrenderer_test PRIVATE c_std_11)
+  target_compile_options(ge007_speedgraphrenderer_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_speedgraphrenderer_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_speedgraphrenderer
+           COMMAND ge007_speedgraphrenderer_test)
+
+  add_executable(ge007_mp_music_test
+    tests/mp_music_test.c
+    src/game/mp_music.c)
+  target_compile_features(ge007_mp_music_test PRIVATE c_std_11)
+  target_compile_options(ge007_mp_music_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_mp_music_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_mp_music
+           COMMAND ge007_mp_music_test)
+
+  add_executable(ge007_dyn_allocator_test
+    tests/dyn_allocator_test.c
+    src/game/dyn.c)
+  target_compile_features(ge007_dyn_allocator_test PRIVATE c_std_11)
+  target_compile_options(ge007_dyn_allocator_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_dyn_allocator_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_dyn_allocator
+           COMMAND ge007_dyn_allocator_test)
+
+  add_executable(ge007_radar_test
+    tests/radar_test.c
+    src/game/radar.c)
+  target_compile_features(ge007_radar_test PRIVATE c_std_11)
+  target_compile_options(ge007_radar_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_radar_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_radar_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_radar
+           COMMAND ge007_radar_test)
+
+  add_executable(ge007_player_state_test
+    tests/player_state_test.c
+    src/game/player.c)
+  target_compile_features(ge007_player_state_test PRIVATE c_std_11)
+  target_compile_options(ge007_player_state_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_player_state_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_player_state
+           COMMAND ge007_player_state_test)
+
+  add_executable(ge007_mp_menu_policy_test
+    tests/mp_menu_policy_test.c
+    src/game/mpmenu.c)
+  target_compile_features(ge007_mp_menu_policy_test PRIVATE c_std_11)
+  target_compile_options(ge007_mp_menu_policy_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_mp_menu_policy_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_mp_menu_policy_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_mp_menu_policy
+           COMMAND ge007_mp_menu_policy_test)
+
+  add_executable(ge007_ramrom_resume_test
+    tests/ramrom_resume_test.c
+    src/game/ramromreplay.c)
+  target_compile_features(ge007_ramrom_resume_test PRIVATE c_std_11)
+  target_compile_options(ge007_ramrom_resume_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_ramrom_resume_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_ramrom_resume_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_ramrom_resume
+           COMMAND ge007_ramrom_resume_test)
+
+  add_executable(ge007_options_state_test
+    tests/options_state_test.c
+    src/game/options.c)
+  target_compile_features(ge007_options_state_test PRIVATE c_std_11)
+  target_compile_options(ge007_options_state_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_options_state_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_options_state_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_options_state
+           COMMAND ge007_options_state_test)
+
+  add_executable(ge007_gun_sight_render_test
+    tests/gun_sight_render_test.c
+    src/game/gunfire.c)
+  target_compile_features(ge007_gun_sight_render_test PRIVATE c_std_11)
+  target_compile_options(ge007_gun_sight_render_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_gun_sight_render_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_gun_sight_render_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_gun_sight_render
+           COMMAND ge007_gun_sight_render_test)
+
+  add_executable(ge007_options_overlay_test
+    tests/options_overlay_test.c
+    port/src/optionsoverlay.c)
+  target_compile_features(ge007_options_overlay_test PRIVATE c_std_11)
+  target_compile_options(ge007_options_overlay_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_options_overlay_test PRIVATE
+    -Wl,--gc-sections)
+  target_link_libraries(ge007_options_overlay_test PRIVATE
+    "${SDL2_LIBRARY}" m)
+  add_test(NAME ge007_options_overlay
+           COMMAND ge007_options_overlay_test)
+  set_tests_properties(ge007_options_overlay
+    PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy")
+
+  add_executable(ge007_language_state_test
+    tests/language_state_test.c
+    src/game/language.c)
+  target_compile_features(ge007_language_state_test PRIVATE c_std_11)
+  target_compile_options(ge007_language_state_test PRIVATE
+    -ffunction-sections -fdata-sections
+    -fsanitize=address -fno-omit-frame-pointer)
+  target_link_options(ge007_language_state_test PRIVATE
+    -Wl,--gc-sections
+    -fsanitize=address)
+  if(UNIX)
+    target_link_libraries(ge007_language_state_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_language_state
+           COMMAND ge007_language_state_test)
+  set_tests_properties(ge007_language_state PROPERTIES
+    ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+
+  add_executable(ge007_rsp_task_test
+    tests/rsp_task_test.c
+    src/game/rsp.c)
+  target_compile_features(ge007_rsp_task_test PRIVATE c_std_11)
+  target_compile_options(ge007_rsp_task_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_rsp_task_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_rsp_task
+           COMMAND ge007_rsp_task_test)
+
+  add_executable(ge007_othermodemicrocode_test
+    tests/othermodemicrocode_test.c
+    src/game/othermodemicrocode.c)
+  target_compile_features(ge007_othermodemicrocode_test PRIVATE c_std_11)
+  target_compile_options(ge007_othermodemicrocode_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_othermodemicrocode_test PRIVATE
+    -Wl,--gc-sections)
+  if(UNIX)
+    target_link_libraries(ge007_othermodemicrocode_test PRIVATE m)
+  endif()
+  add_test(NAME ge007_othermodemicrocode
+           COMMAND ge007_othermodemicrocode_test)
+
+  add_executable(ge007_model_hit_freelist_test
+    tests/model_hit_freelist_test.c
+    src/game/initunk_005450.c)
+  target_compile_features(ge007_model_hit_freelist_test PRIVATE c_std_11)
+  target_compile_options(ge007_model_hit_freelist_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_model_hit_freelist_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_model_hit_freelist
+           COMMAND ge007_model_hit_freelist_test)
+
+  add_executable(ge007_game_initialization_edge_test
+    tests/game_initialization_edge_test.c
+    src/game/initimages.c
+    src/game/initunk_0009E0.c
+    src/game/initunk_007290.c)
+  target_compile_features(ge007_game_initialization_edge_test PRIVATE c_std_11)
+  target_compile_options(ge007_game_initialization_edge_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_game_initialization_edge_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_game_initialization_edge
+           COMMAND ge007_game_initialization_edge_test)
+
+  add_executable(ge007_init_path_table_test
+    tests/init_path_table_test.c
+    src/game/initpathtablesomething.c)
+  target_compile_features(ge007_init_path_table_test PRIVATE c_std_11)
+  target_compile_options(ge007_init_path_table_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_init_path_table_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_init_path_table
+           COMMAND ge007_init_path_table_test)
+
+  add_executable(ge007_init_path_table_links_test
+    tests/initpathtablelinks_test.c
+    src/game/initpathtablelinks.c)
+  target_compile_features(ge007_init_path_table_links_test PRIVATE c_std_11)
+  target_compile_options(ge007_init_path_table_links_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_init_path_table_links_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_init_path_table_links
+           COMMAND ge007_init_path_table_links_test)
+
+  add_executable(ge007_init_weapon_animation_groups_test
+    tests/init_weapon_animation_groups_test.c
+    src/game/initweaponanigroups.c)
+  target_compile_features(ge007_init_weapon_animation_groups_test PRIVATE c_std_11)
+  target_compile_options(ge007_init_weapon_animation_groups_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_init_weapon_animation_groups_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_init_weapon_animation_groups
+           COMMAND ge007_init_weapon_animation_groups_test)
+
+  add_executable(ge007_init_item_slots_test
+    tests/init_item_slots_test.c
+    src/game/inititemslots.c)
+  target_compile_features(ge007_init_item_slots_test PRIVATE c_std_11)
+  target_compile_options(ge007_init_item_slots_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_init_item_slots_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_init_item_slots
+           COMMAND ge007_init_item_slots_test)
+
+  add_executable(ge007_sound_cleanup_test
+    tests/sound_cleanup_test.c
+    src/game/cleanup_object_sounds.c
+    src/game/cleanupSFXRelated.c)
+  target_compile_features(ge007_sound_cleanup_test PRIVATE c_std_11)
+  target_compile_options(ge007_sound_cleanup_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_sound_cleanup_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_sound_cleanup
+           COMMAND ge007_sound_cleanup_test)
+
+  add_executable(ge007_explosion_cleanup_test
+    tests/explosion_cleanup_test.c
+    src/game/cleanexplosions.c)
+  target_compile_features(ge007_explosion_cleanup_test PRIVATE c_std_11)
+  target_compile_options(ge007_explosion_cleanup_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_explosion_cleanup_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_explosion_cleanup
+           COMMAND ge007_explosion_cleanup_test)
+
+  add_executable(ge007_guard_cleanup_test
+    tests/guard_cleanup_test.c
+    src/game/cleanup_guard_data.c)
+  target_compile_features(ge007_guard_cleanup_test PRIVATE c_std_11)
+  target_compile_options(ge007_guard_cleanup_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_guard_cleanup_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_guard_cleanup
+           COMMAND ge007_guard_cleanup_test)
+
+  add_executable(ge007_player_favorite_weapon_test
+    tests/player_favorite_weapon_test.c
+    src/game/playerstats_007770.c)
+  target_compile_features(ge007_player_favorite_weapon_test PRIVATE c_std_11)
+  target_compile_options(ge007_player_favorite_weapon_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_player_favorite_weapon_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_player_favorite_weapon
+           COMMAND ge007_player_favorite_weapon_test)
+
+  add_executable(ge007_explosion_buffer_init_test
+    tests/explosion_buffer_init_test.c
+    src/game/initexplosioncasing.c)
+  target_compile_features(ge007_explosion_buffer_init_test PRIVATE c_std_11)
+  target_compile_options(ge007_explosion_buffer_init_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_explosion_buffer_init_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_explosion_buffer_init
+           COMMAND ge007_explosion_buffer_init_test)
+
+  add_executable(ge007_window_piece_allocation_test
+    tests/window_piece_allocation_test.c
+    src/game/alloc_window_pieces.c)
+  target_compile_features(ge007_window_piece_allocation_test PRIVATE c_std_11)
+  target_compile_options(ge007_window_piece_allocation_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_window_piece_allocation_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_window_piece_allocation
+           COMMAND ge007_window_piece_allocation_test)
+
+  add_executable(ge007_player_sound_cleanup_test
+    tests/player_sound_cleanup_test.c
+    src/game/cleanplayersound.c)
+  target_compile_features(ge007_player_sound_cleanup_test PRIVATE c_std_11)
+  target_compile_options(ge007_player_sound_cleanup_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_player_sound_cleanup_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_player_sound_cleanup
+           COMMAND ge007_player_sound_cleanup_test)
+
+  add_executable(ge007_cheat_text_init_test
+    tests/cheat_text_init_test.c
+    src/game/initcheattext.c)
+  target_compile_features(ge007_cheat_text_init_test PRIVATE c_std_11)
+  target_compile_options(ge007_cheat_text_init_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_cheat_text_init_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_cheat_text_init
+           COMMAND ge007_cheat_text_init_test)
+
+  add_executable(ge007_object_cleanup_dispatch_test
+    tests/object_cleanup_dispatch_test.c
+    src/game/cleanup_objects.c)
+  target_compile_features(ge007_object_cleanup_dispatch_test PRIVATE c_std_11)
+  target_compile_options(ge007_object_cleanup_dispatch_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_object_cleanup_dispatch_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_object_cleanup_dispatch
+           COMMAND ge007_object_cleanup_dispatch_test)
+
+  add_executable(ge007_guard_initialization_test
+    tests/guard_initialization_test.c
+    src/game/initguards.c)
+  target_compile_features(ge007_guard_initialization_test PRIVATE c_std_11)
+  target_compile_options(ge007_guard_initialization_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_guard_initialization_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_guard_initialization
+           COMMAND ge007_guard_initialization_test)
+
+  add_executable(ge007_player_gait_object_init_test
+    tests/player_gait_object_init_test.c
+    src/game/initplayergaitobject.c)
+  target_compile_features(ge007_player_gait_object_init_test PRIVATE c_std_11)
+  target_compile_options(ge007_player_gait_object_init_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_player_gait_object_init_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_player_gait_object_init
+           COMMAND ge007_player_gait_object_init_test)
+
+  add_executable(ge007_model_slot_init_test
+    tests/model_slot_init_test.c
+    src/game/initunk_005520.c)
+  target_compile_features(ge007_model_slot_init_test PRIVATE c_std_11)
+  target_compile_options(ge007_model_slot_init_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_model_slot_init_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_model_slot_init
+           COMMAND ge007_model_slot_init_test)
+
+  add_executable(ge007_initialization_allocations_test
+    tests/initialization_allocations_test.c
+    src/game/initmttex.c
+    src/game/initintromatrices.c)
+  target_compile_features(ge007_initialization_allocations_test PRIVATE c_std_11)
+  target_compile_options(ge007_initialization_allocations_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_initialization_allocations_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_initialization_allocations
+           COMMAND ge007_initialization_allocations_test)
+
+  add_executable(ge007_game_data_initialization_test
+    tests/game_data_initialization_test.c
+    src/game/initgamedata.c)
+  target_compile_features(ge007_game_data_initialization_test PRIVATE c_std_11)
+  target_compile_options(ge007_game_data_initialization_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_game_data_initialization_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_game_data_initialization
+           COMMAND ge007_game_data_initialization_test)
+
+  add_executable(ge007_ejected_cartridges_init_test
+    tests/ejected_cartridges_init_test.c
+    src/game/ejectedcartridges.c)
+  target_compile_features(ge007_ejected_cartridges_init_test PRIVATE c_std_11)
+  target_compile_options(ge007_ejected_cartridges_init_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_ejected_cartridges_init_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_ejected_cartridges_init
+           COMMAND ge007_ejected_cartridges_init_test)
+
+  add_executable(ge007_game_debug_test
+    tests/game_debug_test.c
+    src/game/game_debug.c)
+  target_compile_features(ge007_game_debug_test PRIVATE c_std_11)
+  target_compile_options(ge007_game_debug_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_game_debug_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_game_debug
+           COMMAND ge007_game_debug_test)
+
+  add_executable(ge007_frame_timing_test
+    tests/frame_timing_test.c
+    src/game/frametiming.c)
+  target_compile_features(ge007_frame_timing_test PRIVATE c_std_11)
+  target_compile_options(ge007_frame_timing_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_frame_timing_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_frame_timing
+           COMMAND ge007_frame_timing_test)
+  set_tests_properties(ge007_frame_timing
+    PROPERTIES ENVIRONMENT "GE_D193=1")
+
+  add_executable(ge007_decompress_adapter_test
+    tests/decompress_adapter_test.c
+    src/game/decompress.c)
+  target_compile_features(ge007_decompress_adapter_test PRIVATE c_std_11)
+  target_compile_options(ge007_decompress_adapter_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_decompress_adapter_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_decompress_adapter
+           COMMAND ge007_decompress_adapter_test)
+
+  add_executable(ge007_menu_initialization_test
+    tests/menu_initialization_test.c
+    src/game/initmenus.c)
+  target_compile_features(ge007_menu_initialization_test PRIVATE c_std_11)
+  target_compile_options(ge007_menu_initialization_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_menu_initialization_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_menu_initialization
+           COMMAND ge007_menu_initialization_test)
+
+  add_executable(ge007_viewport_depth_buffer_test
+    tests/viewport_depth_buffer_test.c
+    src/game/viewport.c)
+  target_compile_features(ge007_viewport_depth_buffer_test PRIVATE c_std_11)
+  target_compile_options(ge007_viewport_depth_buffer_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_viewport_depth_buffer_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_viewport_depth_buffer
+           COMMAND ge007_viewport_depth_buffer_test)
+
+  add_executable(ge007_object_initialization_test
+    tests/object_initialization_test.c
+    src/game/initobjects.c)
+  target_compile_features(ge007_object_initialization_test PRIVATE c_std_11)
+  target_compile_options(ge007_object_initialization_test PRIVATE
+    -ffunction-sections -fdata-sections)
+  target_link_options(ge007_object_initialization_test PRIVATE
+    -Wl,--gc-sections)
+  add_test(NAME ge007_object_initialization
+           COMMAND ge007_object_initialization_test)
+
+  set_tests_properties(
+    ge007_dynamic_lighting
+    ge007_explosion_effect
+    ge007_vector_text_frame
+    ge007_vector_text_font_assets
+    ge007_vector_text_route
+    ge007_bump_mapping_policy
+    ge007_textured_vertex_stream_policy
+    ge007_fast3d_light_state
+    ge007_fast3d_normal_policy
+    ge007_bumpmap_generator_policy
+    ge007_bumpmap_decode
+    ge007_bumpmap_metadata
+    ge007_bumpmap_runtime
+    ge007_pdtex_stream
+    ge007_depth_of_field_policy
+    ge007_gfx_wayland_surface_policy
+    ge007_world_lighting_integration
+    ge007_gu_matrix
+    ge007_matrixmath
+    ge007_game_math
+    ge007_geometry
+    ge007_rle
+    ge007_line_tri_intersect
+    ge007_blood_decrypt
+    ge007_blood_animation
+    ge007_rzdecomp
+    ge007_zlib_inflate
+    ge007_crc
+    ge007_objective_status2
+    ge007_objective
+    ge007_loadobjectmodel
+    ge007_cctv_orientation
+    ge007_bondview_r_coop_spawn
+    ge007_record_damage_kills
+    ge007_coop
+    ge007_fake_controller
+    ge007_controller_mapping
+    ge007_input_mapping
+    ge007_sight_policy
+    ge007_viewport_policy
+    ge007_ambient_lighting_regression
+    ge007_water_time_policy
+    ge007_water_heightfield_policy
+    ge007_water_heightfield_integration_contract
+    ge007_water_cpu_render_harness
+    PROPERTIES LABELS ge007-unit)
+  set_tests_properties(
+    ge007_defect_contract
+    ge007_water_render_policy
+    ge007_water_render_reference_math
+    ge007_water_render_pixel_oracle
+    ge007_water_render_bdd_contract
+    ge007_world_water_surface_contract
+    ge007_muzzle_flash_contract
+    ge007_game_utility_edge
+    ge007_bondhead
+    ge007_music_tracks
+    ge007_bgfog
+    ge007_bg_apply_lut
+    ge007_bg_room_trans
+    ge007_file_state
+    ge007_file2_handler
+    ge007_ob_resource
+    ge007_objecthandler2
+    ge007_model_pointer_promotion
+    ge007_model_animation
+    ge007_tex_policy
+    ge007_image_texture
+    ge007_image_bank
+    ge007_chr_b
+    ge007_initanitable
+    ge007_deb_loadallmodels
+    ge007_init_bond_data_defaults
+    ge007_init_actor_propstuff
+    ge007_init_bond_data
+    ge007_unk_092e50
+    ge007_glass
+    ge007_glass2
+    ge007_debugmenu_navigation
+    ge007_bondinv
+    ge007_textrelated_policy
+    ge007_sky_policy
+    ge007_lightfixture
+    ge007_vtxstore
+    ge007_debug_camera
+    ge007_title3_display_list
+    ge007_title2_display_list
+    ge007_indy_comms
+    ge007_bondwalk2_display
+    ge007_speedgraphrenderer
+    ge007_mp_music
+    ge007_dyn_allocator
+    ge007_radar
+    ge007_player_state
+    ge007_mp_menu_policy
+    ge007_ramrom_resume
+    ge007_options_state
+    ge007_gun_sight_render
+    ge007_language_state
+    ge007_rsp_task
+    ge007_othermodemicrocode
+    ge007_model_hit_freelist
+    ge007_game_initialization_edge
+    ge007_init_path_table
+    ge007_init_path_table_links
+    ge007_init_weapon_animation_groups
+    ge007_init_item_slots
+    ge007_sound_cleanup
+    ge007_explosion_cleanup
+    ge007_guard_cleanup
+    ge007_player_favorite_weapon
+    ge007_explosion_buffer_init
+    ge007_window_piece_allocation
+    ge007_player_sound_cleanup
+    ge007_cheat_text_init
+    ge007_object_cleanup_dispatch
+    ge007_guard_initialization
+    ge007_player_gait_object_init
+    ge007_model_slot_init
+    ge007_initialization_allocations
+    ge007_game_data_initialization
+    ge007_ejected_cartridges_init
+    ge007_game_debug
+    ge007_frame_timing
+    ge007_decompress_adapter
+    ge007_menu_initialization
+    ge007_viewport_depth_buffer
+    ge007_object_initialization
+    ge007_options_overlay
+    PROPERTIES LABELS ge007-unit)
+
+  # These are deliberately red-first contracts for live water features that
+  # still need renderer/fixture implementation. Keep them visible and
+  # runnable, but do not let an intentional TDD red state poison the green
+  # unit/coverage gate.
+  set_tests_properties(
+    ge007_water_live_shader_contract
+    ge007_water_render_missed_contract
+    ge007_water_render_quality_contract
+    PROPERTIES LABELS ge007-red)
+
+  if(GE007_ENABLE_COVERAGE)
+    set(_GE007_UNIT_TEST_TARGETS
+      ge007_dynamic_lighting_test
+      ge007_explosion_effect_test
+      ge007_vector_text_frame_test
+      ge007_vector_text_font_assets_test
+      ge007_vector_text_route_test
+      ge007_bump_mapping_policy_test
+      ge007_textured_vertex_stream_policy_test
+      ge007_fast3d_light_state_test
+      ge007_fast3d_normal_policy_test
+      ge007_bumpmap_generator_policy_test
+      ge007_bumpmap_decode_test
+      ge007_bumpmap_metadata_test
+      ge007_bumpmap_runtime_test
+      ge007_pdtex_stream_test
+      ge007_depth_of_field_policy_test
+      ge007_gfx_wayland_surface_policy_test
+      ge007_ascension_postfx_shader_test
+      ge007_world_lighting_integration_test
+      ge007_gu_matrix_test
+      ge007_matrixmath_test
+      ge007_game_math_test
+      ge007_geometry_test
+      ge007_rle_test
+      ge007_line_tri_intersect_test
+      ge007_blood_decrypt_test
+      ge007_blood_animation_test
+      ge007_rzdecomp_test
+      ge007_zlib_inflate_test
+      ge007_crc_test
+      ge007_objective_status2_test
+      ge007_objective_test
+      ge007_loadobjectmodel_test
+      ge007_cctv_orientation_test
+      ge007_bondview_r_coop_spawn_test
+      ge007_record_damage_kills_test
+      ge007_coop_test
+      ge007_fake_controller_test
+      ge007_controller_mapping_test
+      ge007_input_mapping_test
+      ge007_sight_policy_test
+      ge007_viewport_policy_test
+      ge007_defect_contract_test
+    ge007_ambient_lighting_regression_test
+      ge007_water_heightfield_policy_test
+      ge007_water_heightfield_integration_contract_test
+    ge007_water_render_policy_test
+    ge007_water_render_reference_math_test
+    ge007_water_time_policy_test
+    ge007_water_cpu_render_harness_test
+    ge007_water_render_pixel_oracle_test
+      ge007_water_render_bdd_contract_test
+      ge007_world_water_surface_contract_test
+      ge007_muzzle_flash_contract_test
+      ge007_game_utility_edge_test
+      ge007_bondhead_test
+      ge007_music_tracks_test
+      ge007_bgfog_test
+      ge007_bg_apply_lut_test
+      ge007_bg_room_trans_test
+      ge007_file_state_test
+      ge007_file2_handler_test
+      ge007_ob_resource_test
+      ge007_objecthandler2_test
+      ge007_model_pointer_promotion_test
+      ge007_model_animation_test
+      ge007_tex_policy_test
+      ge007_image_texture_test
+      ge007_image_bank_test
+      ge007_chr_b_test
+      ge007_initanitable_test
+      ge007_deb_loadallmodels_test
+      ge007_init_bond_data_defaults_test
+      ge007_init_actor_propstuff_test
+      ge007_init_bond_data_test
+      ge007_unk_092e50_test
+      ge007_glass_test
+      ge007_glass2_test
+      ge007_debugmenu_navigation_test
+      ge007_bondinv_test
+      ge007_textrelated_policy_test
+      ge007_sky_policy_test
+      ge007_lightfixture_test
+      ge007_vtxstore_test
+      ge007_debug_camera_test
+      ge007_title3_display_list_test
+      ge007_title2_display_list_test
+      ge007_indy_comms_test
+      ge007_bondwalk2_display_test
+      ge007_speedgraphrenderer_test
+      ge007_mp_music_test
+      ge007_dyn_allocator_test
+      ge007_radar_test
+      ge007_player_state_test
+      ge007_mp_menu_policy_test
+      ge007_ramrom_resume_test
+      ge007_options_state_test
+      ge007_gun_sight_render_test
+      ge007_options_overlay_test
+      ge007_language_state_test
+      ge007_rsp_task_test
+      ge007_othermodemicrocode_test
+      ge007_model_hit_freelist_test
+      ge007_game_initialization_edge_test
+      ge007_init_path_table_test
+      ge007_init_path_table_links_test
+      ge007_init_weapon_animation_groups_test
+      ge007_init_item_slots_test
+      ge007_sound_cleanup_test
+      ge007_explosion_cleanup_test
+      ge007_guard_cleanup_test
+      ge007_player_favorite_weapon_test
+      ge007_explosion_buffer_init_test
+      ge007_window_piece_allocation_test
+      ge007_player_sound_cleanup_test
+      ge007_cheat_text_init_test
+      ge007_object_cleanup_dispatch_test
+      ge007_guard_initialization_test
+      ge007_player_gait_object_init_test
+      ge007_model_slot_init_test
+      ge007_initialization_allocations_test
+      ge007_game_data_initialization_test
+      ge007_ejected_cartridges_init_test
+      ge007_game_debug_test
+      ge007_frame_timing_test
+      ge007_decompress_adapter_test
+      ge007_menu_initialization_test
+      ge007_viewport_depth_buffer_test
+      ge007_object_initialization_test)
+
+    foreach(_GE007_TEST_TARGET IN LISTS _GE007_UNIT_TEST_TARGETS)
+      target_compile_options(${_GE007_TEST_TARGET} PRIVATE --coverage -O0 -g)
+      target_link_options(${_GE007_TEST_TARGET} PRIVATE --coverage)
+    endforeach()
+
+    file(GLOB _GE007_COVERAGE_REQUIRED_FILES CONFIGURE_DEPENDS
+      "${CMAKE_SOURCE_DIR}/port/include/*_policy.h"
+      "${CMAKE_SOURCE_DIR}/port/fast3d/*_policy.h")
+
+    # dynamic_lighting.h predates the *_policy.h naming convention but is a
+    # pure policy header with a dedicated exhaustive unit test.
+    list(APPEND _GE007_COVERAGE_REQUIRED_FILES
+      "${CMAKE_SOURCE_DIR}/port/fast3d/dynamic_lighting.h"
+      "${CMAKE_SOURCE_DIR}/port/fast3d/fast3d_ambient_lighting.h"
+      "${CMAKE_SOURCE_DIR}/port/fast3d/vector_text_layout.h"
+      "${CMAKE_SOURCE_DIR}/tools/mktex/src/bumpmap_decode.c"
+      "${CMAKE_SOURCE_DIR}/tools/mktex/src/bumpmap_metadata.c"
+      "${CMAKE_SOURCE_DIR}/tools/mktex/src/bumpmap_policy.h"
+      "${CMAKE_SOURCE_DIR}/src/game/objective_status.c")
+    list(SORT _GE007_COVERAGE_REQUIRED_FILES)
+    string(REPLACE ";" "|" _GE007_COVERAGE_REQUIRED_FILES_ARG
+      "${_GE007_COVERAGE_REQUIRED_FILES}")
+    set(_GE007_COVERAGE_GAME_UNIT_FILES
+      "${CMAKE_SOURCE_DIR}/port/fast3d/bumpmap_runtime.cpp"
+      "${CMAKE_SOURCE_DIR}/src/game/matrixmath.c"
+      "${CMAKE_SOURCE_DIR}/src/game/matrixmath_misc.c"
+      "${CMAKE_SOURCE_DIR}/src/game/math_asinacos.c"
+      "${CMAKE_SOURCE_DIR}/src/game/math_asinfacosf.c"
+      "${CMAKE_SOURCE_DIR}/src/game/math_atan2f.c"
+      "${CMAKE_SOURCE_DIR}/src/game/math_ceil.c"
+      "${CMAKE_SOURCE_DIR}/src/game/math_floor.c"
+      "${CMAKE_SOURCE_DIR}/src/game/math_unk_05A9E0.c"
+      "${CMAKE_SOURCE_DIR}/src/game/quaternion.c"
+      "${CMAKE_SOURCE_DIR}/src/libultra/gu/rotate.c"
+      "${CMAKE_SOURCE_DIR}/src/libultra/gu/scale.c"
+      "${CMAKE_SOURCE_DIR}/src/libultra/gu/translate.c"
+      "${CMAKE_SOURCE_DIR}/src/libultra/gu/ortho.c"
+      "${CMAKE_SOURCE_DIR}/src/libultra/gu/perspective.c"
+      "${CMAKE_SOURCE_DIR}/src/libultra/gu/lookat.c"
+      "${CMAKE_SOURCE_DIR}/src/libultra/gu/sins.c"
+      "${CMAKE_SOURCE_DIR}/src/libultra/gu/coss.c"
+      "${CMAKE_SOURCE_DIR}/src/game/stanintersection.c"
+      "${CMAKE_SOURCE_DIR}/src/game/rle.c"
+      "${CMAKE_SOURCE_DIR}/src/game/line_tri_intersect.c"
+      "${CMAKE_SOURCE_DIR}/src/game/blood_decrypt.c"
+      "${CMAKE_SOURCE_DIR}/src/game/blood_animation.c"
+      "${CMAKE_SOURCE_DIR}/port/src/rzdecomp.c"
+      "${CMAKE_SOURCE_DIR}/src/game/zlib.c"
+      "${CMAKE_SOURCE_DIR}/src/game/crc.c"
+      "${CMAKE_SOURCE_DIR}/src/game/objective_status2.c"
+      "${CMAKE_SOURCE_DIR}/src/game/objective.c"
+      "${CMAKE_SOURCE_DIR}/src/game/loadobjectmodel.c"
+      "${CMAKE_SOURCE_DIR}/src/game/cctv.c"
+      "${CMAKE_SOURCE_DIR}/src/game/cleanup_alarms.c"
+      "${CMAKE_SOURCE_DIR}/src/game/cleanup_objectives.c"
+      "${CMAKE_SOURCE_DIR}/src/game/cleanwindowpieces.c"
+      "${CMAKE_SOURCE_DIR}/src/game/compiletime.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initnull_0009D0.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initnull_000BC0.c"
+      "${CMAKE_SOURCE_DIR}/src/game/mp_weapon.c"
+      "${CMAKE_SOURCE_DIR}/src/game/null_007970.c"
+      "${CMAKE_SOURCE_DIR}/src/game/padhalllv.c"
+      "${CMAKE_SOURCE_DIR}/src/game/bondhead.c"
+      "${CMAKE_SOURCE_DIR}/src/game/music_0D2720.c"
+      "${CMAKE_SOURCE_DIR}/src/game/bgfog.c"
+      "${CMAKE_SOURCE_DIR}/src/game/sky.c"
+      "${CMAKE_SOURCE_DIR}/src/game/tex.c"
+      "${CMAKE_SOURCE_DIR}/src/game/image_bank.c"
+      "${CMAKE_SOURCE_DIR}/src/game/chr_b.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initanitable.c"
+      "${CMAKE_SOURCE_DIR}/src/game/deb_loadallmodels.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initBondDATAdefaults.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initactorpropstuff.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initBondDATA.c"
+      "${CMAKE_SOURCE_DIR}/src/game/unk_092E50.c"
+      "${CMAKE_SOURCE_DIR}/src/game/glass.c"
+      "${CMAKE_SOURCE_DIR}/src/game/glass2.c"
+      "${CMAKE_SOURCE_DIR}/src/game/debugmenu_08FE00.c"
+      "${CMAKE_SOURCE_DIR}/src/game/bondinv.c"
+      "${CMAKE_SOURCE_DIR}/src/game/othermodemicrocode.c"
+      "${CMAKE_SOURCE_DIR}/src/game/bgapply.c"
+      "${CMAKE_SOURCE_DIR}/src/game/bgroomtrans.c"
+      "${CMAKE_SOURCE_DIR}/src/game/file.c"
+      "${CMAKE_SOURCE_DIR}/src/game/file2.c"
+      "${CMAKE_SOURCE_DIR}/src/game/ob.c"
+      "${CMAKE_SOURCE_DIR}/src/game/objecthandler_2.c"
+      "${CMAKE_SOURCE_DIR}/src/game/lightfixture.c"
+      "${CMAKE_SOURCE_DIR}/src/game/vtxstore.c"
+      "${CMAKE_SOURCE_DIR}/src/game/debug_camera.c"
+      "${CMAKE_SOURCE_DIR}/src/game/title3.c"
+      "${CMAKE_SOURCE_DIR}/src/game/title2.c"
+      "${CMAKE_SOURCE_DIR}/src/game/indy_comms.c"
+      "${CMAKE_SOURCE_DIR}/src/game/bondwalk2.c"
+      "${CMAKE_SOURCE_DIR}/src/game/speedgraphrenderer.c"
+      "${CMAKE_SOURCE_DIR}/src/game/mp_music.c"
+      "${CMAKE_SOURCE_DIR}/src/game/dyn.c"
+      "${CMAKE_SOURCE_DIR}/src/game/radar.c"
+      "${CMAKE_SOURCE_DIR}/src/game/player.c"
+      "${CMAKE_SOURCE_DIR}/src/game/language.c"
+      "${CMAKE_SOURCE_DIR}/src/game/rsp.c"
+      "${CMAKE_SOURCE_DIR}/src/game/setguscale.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initunk_005450.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initimages.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initunk_0009E0.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initunk_007290.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initpathtablesomething.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initpathtablelinks.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initweaponanigroups.c"
+      "${CMAKE_SOURCE_DIR}/src/game/inititemslots.c"
+      "${CMAKE_SOURCE_DIR}/src/game/cleanup_object_sounds.c"
+      "${CMAKE_SOURCE_DIR}/src/game/cleanupSFXRelated.c"
+      "${CMAKE_SOURCE_DIR}/src/game/cleanexplosions.c"
+      "${CMAKE_SOURCE_DIR}/src/game/cleanup_guard_data.c"
+      "${CMAKE_SOURCE_DIR}/src/game/playerstats_007770.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initexplosioncasing.c"
+      "${CMAKE_SOURCE_DIR}/src/game/alloc_window_pieces.c"
+      "${CMAKE_SOURCE_DIR}/src/game/cleanplayersound.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initcheattext.c"
+      "${CMAKE_SOURCE_DIR}/src/game/cleanup_objects.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initguards.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initplayergaitobject.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initunk_005520.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initmttex.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initintromatrices.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initgamedata.c"
+      "${CMAKE_SOURCE_DIR}/src/game/ejectedcartridges.c"
+      "${CMAKE_SOURCE_DIR}/src/game/game_debug.c"
+      "${CMAKE_SOURCE_DIR}/src/game/frametiming.c"
+      "${CMAKE_SOURCE_DIR}/src/game/ramromreplay.c"
+      "${CMAKE_SOURCE_DIR}/src/game/decompress.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initmenus.c"
+      "${CMAKE_SOURCE_DIR}/src/game/viewport.c"
+      "${CMAKE_SOURCE_DIR}/src/game/initobjects.c")
+    string(REPLACE ";" "|" _GE007_COVERAGE_GAME_UNIT_FILES_ARG
+      "${_GE007_COVERAGE_GAME_UNIT_FILES}")
+
+    add_custom_target(ge007_coverage
+      COMMAND "${CMAKE_COMMAND}"
+        "-DGE007_COVERAGE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+        "-DGE007_COVERAGE_CTEST_COMMAND=${CMAKE_CTEST_COMMAND}"
+        "-DGE007_COVERAGE_GCOV=${GE007_GCOV_EXECUTABLE}"
+        "-DGE007_COVERAGE_REQUIRED_FILES=${_GE007_COVERAGE_REQUIRED_FILES_ARG}"
+        "-DGE007_COVERAGE_MIN_LINES=${GE007_COVERAGE_MIN_LINES}"
+        "-DGE007_COVERAGE_MIN_BRANCHES=${GE007_COVERAGE_MIN_BRANCHES}"
+        "-DGE007_COVERAGE_ADDITIONAL_FILES=${_GE007_COVERAGE_GAME_UNIT_FILES_ARG}"
+        "-DGE007_COVERAGE_GAME_SOURCE_DIR=${CMAKE_SOURCE_DIR}/src/game"
+        "-DGE007_COVERAGE_ADDITIONAL_MIN_LINES=80"
+        "-DGE007_COVERAGE_ADDITIONAL_MIN_BRANCHES=80"
+        -P "${CMAKE_SOURCE_DIR}/cmake/coverage_gate.cmake"
+      DEPENDS ${_GE007_UNIT_TEST_TARGETS}
+      USES_TERMINAL
+      VERBATIM)
+  endif()
+
   add_test(NAME ge007_pc_bdd
            COMMAND bash "${CMAKE_SOURCE_DIR}/tests/run_pc_bdd.sh")
   set_tests_properties(ge007_pc_bdd
-    PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    PROPERTIES
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      SKIP_RETURN_CODE 77)
+
+  add_test(NAME ge007_wayland_smoke
+           COMMAND bash "${CMAKE_SOURCE_DIR}/tests/run_wayland_smoke.sh"
+                   "$<TARGET_FILE:ge007>")
+  set_tests_properties(ge007_wayland_smoke
+    PROPERTIES
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      SKIP_RETURN_CODE 77)
+
+  add_executable(ge007_wayland_sdl_swap_probe
+    tests/wayland_sdl_swap_probe.cpp
+    port/fast3d/glad/glad.c)
+  target_include_directories(ge007_wayland_sdl_swap_probe PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_wayland_sdl_swap_probe PRIVATE cxx_std_17)
+  target_link_libraries(ge007_wayland_sdl_swap_probe PRIVATE
+    "${SDL2_LIBRARY}" "${GL_LIBRARY}")
+  add_test(NAME ge007_wayland_sdl_swap_probe
+           COMMAND ge007_wayland_sdl_swap_probe)
+  set_tests_properties(ge007_wayland_sdl_swap_probe
+    PROPERTIES
+      LABELS "ge007-wayland;ge007-control"
+      ENVIRONMENT "GE_WAYLAND_PROBE_RESIZE=1"
+      SKIP_RETURN_CODE 77
+      TIMEOUT 8)
 endif()
 
 message(STATUS "Output binary: ${BIN_NAME}")

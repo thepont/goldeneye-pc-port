@@ -137,6 +137,12 @@ void sub_GAME_7F0A1DA0(coord3d *pos, coord3d *xaxis, coord3d *yaxis, coord3d *za
  */
 void glassCreateShard(coord3d* pos, f32 rotX, f32 shard_size)
 {
+    if (SHATTERED_WINDOW_PIECES_BUFFER_LEN <= 0 ||
+        ptr_shattered_window_pieces == NULL)
+    {
+        return;
+    }
+
     /**
      * Horizontal X velocity component with randomness. Range: [-1.0, +1.0]
      */

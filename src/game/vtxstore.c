@@ -305,7 +305,11 @@ void sub_GAME_7F09BBBC(void)
 * PD name: vtxstore_allocate
 * Description: Allocation for batches within the storage space
 */
-s32 vtxstore_allocate(s32 arg0, s32 type, s32 arg2, s32 arg3) 
+#ifdef PORT
+uintptr_t vtxstore_allocate(s32 arg0, s32 type, s32 arg2, s32 arg3)
+#else
+s32 vtxstore_allocate(s32 arg0, s32 type, s32 arg2, s32 arg3)
+#endif
 {
     s16* var_t3;
     s16 temp_t2;
@@ -321,12 +325,20 @@ s32 vtxstore_allocate(s32 arg0, s32 type, s32 arg2, s32 arg3)
         case 0xCCCC:
             var_t0 = dword_CODE_bss_8007A0E8;
             var_t3 = &word_CODE_bss_8007A0F0;
+#ifdef PORT
+            var_a2 = dword_CODE_bss_8007A0D4;
+#else
             var_a2 = ((s16 *)&dword_CODE_bss_8007A0D4)[1];
+#endif
             break;
         case 0xB0B:
             var_t0 = dword_CODE_bss_8007A0EC;
             var_t3 = &word_CODE_bss_8007A0F2;
+#ifdef PORT
+            var_a2 = dword_CODE_bss_8007A0DC;
+#else
             var_a2 = ((s16 *)&dword_CODE_bss_8007A0DC)[1];
+#endif
             break;
         default:
             return 0;
@@ -383,7 +395,11 @@ s32 vtxstore_allocate(s32 arg0, s32 type, s32 arg2, s32 arg3)
         } else {
             *var_t3 -= temp_t2;
         }
+#ifdef PORT
+        return (uintptr_t)var_t0[var_a1].unk00;
+#else
         return (s32)var_t0[var_a1].unk00;
+#endif
     }
     return 0;
 }
@@ -464,4 +480,3 @@ void sub_GAME_7F09C044(Vertex* arg0) {
         }
     }
 }
-

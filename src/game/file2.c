@@ -128,6 +128,11 @@ void fileResetSave(save_data *save)
  */
 u32 fileGetSaveFolder(save_data *save)
 {
+  if (save == NULL)
+  {
+    return 0;
+  }
+
   return save->completion_bitflags & SAVEFLAG_FOLDER;
 }
 
@@ -139,6 +144,11 @@ u32 fileGetSaveFolder(save_data *save)
  */
 void fileSetSaveFoldernum(save_data *save, u32 folder)
 {
+    if (save == NULL)
+    {
+        return;
+    }
+
     save->completion_bitflags &= ~SAVEFLAG_FOLDER;
     save->completion_bitflags |= folder & SAVEFLAG_FOLDER;
 }
@@ -151,6 +161,11 @@ void fileSetSaveFoldernum(save_data *save, u32 folder)
  */
 u32 fileGetSaveFlagSlot(save_data *folder)
 {
+  if (folder == NULL)
+  {
+    return 0;
+  }
+
   return (folder->completion_bitflags & SAVEFLAG_SLOT) >> 3;
 }
 
@@ -162,6 +177,11 @@ u32 fileGetSaveFlagSlot(save_data *folder)
  */
 void fileResetSaveFlagSlot(save_data *folder, s32 slot)
 {
+    if (folder == NULL)
+    {
+        return;
+    }
+
     folder->completion_bitflags &= ~SAVEFLAG_SLOT;
     folder->completion_bitflags |= ((slot * 8) & SAVEFLAG_SLOT);
 }
@@ -174,6 +194,11 @@ void fileResetSaveFlagSlot(save_data *folder, s32 slot)
  */
 u32 fileGetSelectedBond(save_data *folder)
 {
+  if (folder == NULL)
+  {
+    return 0;
+  }
+
   return (folder->completion_bitflags & SAVEFLAG_BOND) >> 5;
 }
 
@@ -185,6 +210,11 @@ u32 fileGetSelectedBond(save_data *folder)
  */
 void fileSetSelectedBond(save_data *folder, s32 bond)
 {
+    if (folder == NULL)
+    {
+        return;
+    }
+
     folder->completion_bitflags &= ~SAVEFLAG_BOND;
     folder->completion_bitflags |= ((bond << 5) & SAVEFLAG_BOND);
 }
@@ -197,6 +227,11 @@ void fileSetSelectedBond(save_data *folder, s32 bond)
  */
 bool fileGetSaveFlagDoReset(save_data *folder)
 {
+  if (folder == NULL)
+  {
+    return FALSE;
+  }
+
   return ((folder->completion_bitflags & SAVEFLAG_DORESET) != FALSE);
 }
 
@@ -209,6 +244,11 @@ bool fileGetSaveFlagDoReset(save_data *folder)
  */
 void fileSetSaveFlagDoReset(save_data *folder, bool enable)
 {
+    if (folder == NULL)
+    {
+        return;
+    }
+
     if (enable)
     {
         folder->completion_bitflags |= SAVEFLAG_DORESET;
@@ -233,6 +273,11 @@ s32 fileGetSaveStageDifficultyTime(save_data* save, LEVEL_SOLO_SEQUENCE levelid,
     LEVEL_SOLO_SEQUENCE max_level;
     u32 time;
     s32 index;
+
+    if (save == NULL)
+    {
+        return 0;
+    }
 
     max_level = SP_LEVEL_MAX;
     if ((levelid >= SP_LEVEL_DAM) && (levelid < SP_LEVEL_MAX ) && (difficulty >= DIFFICULTY_AGENT) && (difficulty < DIFFICULTY_MAX))
@@ -294,10 +339,17 @@ void fileSetDifficultyStageTime(save_data *save, LEVEL_SOLO_SEQUENCE levelid, DI
     s32 index;
     LEVEL_SOLO_SEQUENCE max_level;
 
+    if (save == NULL)
+    {
+        return;
+    }
+
     max_level = SP_LEVEL_MAX;
     if ((levelid >= SP_LEVEL_DAM) && (levelid < SP_LEVEL_MAX ) && (difficulty >= DIFFICULTY_AGENT) && (difficulty < DIFFICULTY_007))
     {
-        if (newtime == 0) {
+        if (newtime < 0) {
+            return;
+        } else if (newtime == 0) {
             newtime = 0x4f;
         } else if (newtime > 0x3ff) {
             newtime = 0x3ff;
@@ -352,7 +404,8 @@ void fileSetDifficultyStageTime(save_data *save, LEVEL_SOLO_SEQUENCE levelid, DI
  */
 bool fileGetSaveStageCompletedForDifficulty(save_data *folder, LEVEL_SOLO_SEQUENCE levelid, DIFFICULTY difficulty)
 {
-    if ((levelid >= SP_LEVEL_DAM) && (levelid < SP_LEVEL_MAX) && (difficulty >= DIFFICULTY_AGENT) && (difficulty <= DIFFICULTY_007))
+    if (folder != NULL &&
+        (levelid >= SP_LEVEL_DAM) && (levelid < SP_LEVEL_MAX) && (difficulty >= DIFFICULTY_AGENT) && (difficulty <= DIFFICULTY_007))
     {
         return fileGetSaveStageDifficultyTime(folder, levelid, difficulty) != 0;
     }
@@ -370,7 +423,8 @@ bool fileGetSaveStageCompletedForDifficulty(save_data *folder, LEVEL_SOLO_SEQUEN
  */
 void fileCheckSaveStageDifficultyTime(save_data *folder, LEVEL_SOLO_SEQUENCE levelid, DIFFICULTY difficulty, s32 newtime)
 {
-    if ((levelid >= SP_LEVEL_DAM) && (levelid < SP_LEVEL_MAX) && (difficulty >= DIFFICULTY_AGENT) && (difficulty <= DIFFICULTY_007))
+    if (folder != NULL &&
+        (levelid >= SP_LEVEL_DAM) && (levelid < SP_LEVEL_MAX) && (difficulty >= DIFFICULTY_AGENT) && (difficulty <= DIFFICULTY_007))
     {
         s32 time = fileGetSaveStageDifficultyTime(folder, levelid, difficulty);
 
@@ -420,7 +474,7 @@ bool fileGetIsCheatUnlocked(save_data *save, s32 cheat)
     }
 #endif
 
-    if (cheat >= 0 && cheat < CHEAT_INPUT_BUFFER_SIZE)
+    if (save != NULL && cheat >= 0 && cheat < CHEAT_INPUT_BUFFER_SIZE)
     {
         bits = save->unlocked_cheats_1 | save->unlocked_cheats_3 << 0x18 | save->unlocked_cheats_3 << 0x10 | save->unlocked_cheats_2 << 8;
         return ((1 << cheat) & bits) != 0;

@@ -49,6 +49,11 @@ s32 ceil8000(s32 arg0)
     f32 temp_f0;
     s32 temp_f10;
 
+    if (arg0 <= 0)
+    {
+        return 0;
+    }
+
     temp_f0 = 32768.0f / ((((s32) (arg0 + 15)) / 16) * 16);
     temp_f10 = temp_f0;
 
@@ -61,6 +66,11 @@ s32 ceil4000(s32 arg0)
 {
     f32 temp_f0;
     s32 temp_f10;
+
+    if (arg0 <= 0)
+    {
+        return 0;
+    }
 
     temp_f0 = 16384.0f / ((((s32) (arg0 + 7)) / 8) * 8);
     temp_f10 = temp_f0;
@@ -75,6 +85,11 @@ s32 ceil2000(s32 arg0)
     f32 temp_f0;
     s32 temp_f10;
 
+    if (arg0 <= 0)
+    {
+        return 0;
+    }
+
     temp_f0 = 8192.0f / ((((s32) (arg0 + 3)) / 4) * 4);
     temp_f10 = temp_f0;
 
@@ -87,6 +102,11 @@ s32 ceil1000(s32 arg0)
 {
     f32 temp_f0;
     s32 temp_f10;
+
+    if (arg0 <= 0)
+    {
+        return 0;
+    }
 
     temp_f0 = 4096.0f / ((((s32) (arg0 + 3)) / 4) * 4);
     temp_f10 = temp_f0;
@@ -690,6 +710,3 @@ void sub_GAME_7F077BB8(s32 arg0, s32 arg1, s32 arg2, s32 arg3)
 {
     return;
 }
-
-
-

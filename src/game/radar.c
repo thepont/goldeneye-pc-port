@@ -53,7 +53,9 @@ Gfx *display_red_blue_on_radar(Gfx *DL)
     cur_playernum = get_cur_playernum();
     player_count = getPlayerCount();
     
-    if (player_count == 1)
+    /* g_playerPointers has MAX_MULTIPLAYER entries; invalid counts must not render or
+     * make the marker loop walk beyond that table. */
+    if ((player_count < MIN_MULTIPLAYER) || (player_count > MAX_MULTIPLAYER))
     {
         return DL;
     }

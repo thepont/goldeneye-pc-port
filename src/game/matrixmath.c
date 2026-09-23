@@ -581,56 +581,136 @@ void sub_GAME_7F059334(Mtx *src, Mtx *dst) {
 }
 
 /*
+ * Build the same right/up/forward basis used by the N64 camera and prop
+ * code. The target-facing basis is deliberately negated: GE model/view
+ * matrices use local -Z as their forward direction. Keeping this in one
+ * guarded helper means a malformed level vector cannot create NaNs in either
+ * a view matrix or a CCTV prop matrix.
+ */
+static s32 matrix_build_target_basis(
+    f32 basis_x, f32 basis_y, f32 basis_z,
+    f32 up_x, f32 up_y, f32 up_z,
+    f32 *right_x, f32 *right_y, f32 *right_z,
+    f32 *result_up_x, f32 *result_up_y, f32 *result_up_z,
+    f32 *result_basis_x, f32 *result_basis_y, f32 *result_basis_z)
+{
+    f32 norm_basis = sqrtf(
+        (basis_x * basis_x) + (basis_y * basis_y) + (basis_z * basis_z));
+
+    if (!(norm_basis > EPSILON))
+    {
+        return 0;
+    }
+
+    norm_basis = -1.0f / norm_basis;
+    basis_x *= norm_basis;
+    basis_y *= norm_basis;
+    basis_z *= norm_basis;
+
+    *right_x = (up_y * basis_z) - (up_z * basis_y);
+    *right_y = (up_z * basis_x) - (up_x * basis_z);
+    *right_z = (up_x * basis_y) - (up_y * basis_x);
+
+    f32 norm_right = sqrtf(
+        (*right_x * *right_x) + (*right_y * *right_y) +
+        (*right_z * *right_z));
+
+    /* A level can supply an up vector parallel to its target vector. Select a
+     * stable cardinal up vector in that case instead of dividing by zero. */
+    if (!(norm_right > EPSILON))
+    {
+        if ((basis_y > -0.9f) && (basis_y < 0.9f))
+        {
+            up_x = 0.0f;
+            up_y = 1.0f;
+            up_z = 0.0f;
+        }
+        else
+        {
+            up_x = 1.0f;
+            up_y = 0.0f;
+            up_z = 0.0f;
+        }
+
+        *right_x = (up_y * basis_z) - (up_z * basis_y);
+        *right_y = (up_z * basis_x) - (up_x * basis_z);
+        *right_z = (up_x * basis_y) - (up_y * basis_x);
+        norm_right = sqrtf(
+            (*right_x * *right_x) + (*right_y * *right_y) +
+            (*right_z * *right_z));
+    }
+
+    if (!(norm_right > EPSILON))
+    {
+        return 0;
+    }
+
+    norm_right = 1.0f / norm_right;
+    *right_x *= norm_right;
+    *right_y *= norm_right;
+    *right_z *= norm_right;
+
+    *result_up_x = (basis_y * *right_z) - (basis_z * *right_y);
+    *result_up_y = (basis_z * *right_x) - (basis_x * *right_z);
+    *result_up_z = (basis_x * *right_y) - (basis_y * *right_x);
+
+    f32 norm_up = sqrtf(
+        (*result_up_x * *result_up_x) + (*result_up_y * *result_up_y) +
+        (*result_up_z * *result_up_z));
+    if (!(norm_up > EPSILON))
+    {
+        return 0;
+    }
+
+    norm_up = 1.0f / norm_up;
+    *result_up_x *= norm_up;
+    *result_up_y *= norm_up;
+    *result_up_z *= norm_up;
+    *result_basis_x = basis_x;
+    *result_basis_y = basis_y;
+    *result_basis_z = basis_z;
+    return 1;
+}
+
+/*
  * Address: 0x7F059424
 */
 void matrix_4x4_set_lookat(Mtxf *matrix, f32 eye_x, f32 eye_y, f32 eye_z, f32 forward_x, f32 forward_y, f32 forward_z, f32 up_x, f32 up_y, f32 up_z) {
     f32 right_x;
     f32 right_y;
-    f32 norm_right;
-    f32 norm_up;
     f32 right_z;
+    f32 result_up_x;
+    f32 result_up_y;
+    f32 result_up_z;
+    f32 result_basis_x;
+    f32 result_basis_y;
+    f32 result_basis_z;
 
-    // Normalize forward vector
-    f32 norm_forward = -1.0f / sqrtf((forward_x * forward_x) + (forward_y * forward_y) + (forward_z * forward_z));
-    forward_x *= norm_forward;
-    forward_y *= norm_forward;
-    forward_z *= norm_forward;
+    if (!matrix_build_target_basis(
+            forward_x, forward_y, forward_z, up_x, up_y, up_z,
+            &right_x, &right_y, &right_z,
+            &result_up_x, &result_up_y, &result_up_z,
+            &result_basis_x, &result_basis_y, &result_basis_z))
+    {
+        matrix_4x4_set_identity(matrix);
+        matrix->m[3][0] = -eye_x;
+        matrix->m[3][1] = -eye_y;
+        matrix->m[3][2] = -eye_z;
+        return;
+    }
 
-    // Compute right vector (cross product of up and forward)
-    right_x = (up_y * forward_z) - (up_z * forward_y);
-    right_y = (up_z * forward_x) - (up_x * forward_z);
-    right_z = (up_x * forward_y) - (up_y * forward_x);
-
-    // Normalize right vector
-    norm_right = 1.0f / sqrtf((right_x * right_x) + (right_y * right_y) + (right_z * right_z));
-    right_x *= norm_right;
-    right_y *= norm_right;
-    right_z *= norm_right;
-
-    // Recompute up vector (cross product of forward and right)
-    up_x = (forward_y * right_z) - (forward_z * right_y);
-    up_y = (forward_z * right_x) - (forward_x * right_z);
-    up_z = (forward_x * right_y) - (forward_y * right_x);
-
-    // Normalize up vector
-    norm_up = 1.0f / sqrtf((up_x * up_x) + (up_y * up_y) + (up_z * up_z));
-    up_x *= norm_up;
-    up_y *= norm_up;
-    up_z *= norm_up;
-
-    // Set matrix columns
     matrix->m[0][0] = right_x;
     matrix->m[1][0] = right_y;
     matrix->m[2][0] = right_z;
     matrix->m[3][0] = -((eye_x * right_x) + (eye_y * right_y) + (eye_z * right_z));
-    matrix->m[0][1] = up_x;
-    matrix->m[1][1] = up_y;
-    matrix->m[2][1] = up_z;
-    matrix->m[3][1] = -((eye_x * up_x) + (eye_y * up_y) + (eye_z * up_z));
-    matrix->m[0][2] = forward_x;
-    matrix->m[1][2] = forward_y;
-    matrix->m[2][2] = forward_z;
-    matrix->m[3][2] = -((eye_x * forward_x) + (eye_y * forward_y) + (eye_z * forward_z));
+    matrix->m[0][1] = result_up_x;
+    matrix->m[1][1] = result_up_y;
+    matrix->m[2][1] = result_up_z;
+    matrix->m[3][1] = -((eye_x * result_up_x) + (eye_y * result_up_y) + (eye_z * result_up_z));
+    matrix->m[0][2] = result_basis_x;
+    matrix->m[1][2] = result_basis_y;
+    matrix->m[2][2] = result_basis_z;
+    matrix->m[3][2] = -((eye_x * result_basis_x) + (eye_y * result_basis_y) + (eye_z * result_basis_z));
     matrix->m[0][3] = 0.0f;
     matrix->m[1][3] = 0.0f;
     matrix->m[2][3] = 0.0f;
@@ -650,38 +730,38 @@ void matrix_4x4_set_lookat_target(Mtxf *matrix, f32 eye_x, f32 eye_y, f32 eye_z,
 void matrix_4x4_set_basis_and_position(Mtxf *matrix, f32 pos_x, f32 pos_y, f32 pos_z, f32 basis_x, f32 basis_y, f32 basis_z, f32 up_x, f32 up_y, f32 up_z) {
     f32 right_x;
     f32 right_y;
-    f32 norm_right;
-    f32 norm_up;
     f32 right_z;
-    f32 norm_basis = -1.0f / sqrtf((basis_x * basis_x) + (basis_y * basis_y) + (basis_z * basis_z));
-    basis_x *= norm_basis;
-    basis_y *= norm_basis;
-    basis_z *= norm_basis;
-    right_x = (up_y * basis_z) - (up_z * basis_y);
-    right_y = (up_z * basis_x) - (up_x * basis_z);
-    right_z = (up_x * basis_y) - (up_y * basis_x);
-    norm_right = 1.0f / sqrtf((right_x * right_x) + (right_y * right_y) + (right_z * right_z));
-    right_x *= norm_right;
-    right_y *= norm_right;
-    right_z *= norm_right;
-    up_x = (basis_y * right_z) - (basis_z * right_y);
-    up_y = (basis_z * right_x) - (basis_x * right_z);
-    up_z = (basis_x * right_y) - (basis_y * right_x);
-    norm_up = 1.0f / sqrtf((up_x * up_x) + (up_y * up_y) + (up_z * up_z));
-    up_x *= norm_up;
-    up_y *= norm_up;
-    up_z *= norm_up;
+    f32 result_up_x;
+    f32 result_up_y;
+    f32 result_up_z;
+    f32 result_basis_x;
+    f32 result_basis_y;
+    f32 result_basis_z;
+
+    if (!matrix_build_target_basis(
+            basis_x, basis_y, basis_z, up_x, up_y, up_z,
+            &right_x, &right_y, &right_z,
+            &result_up_x, &result_up_y, &result_up_z,
+            &result_basis_x, &result_basis_y, &result_basis_z))
+    {
+        matrix_4x4_set_identity(matrix);
+        matrix->m[3][0] = pos_x;
+        matrix->m[3][1] = pos_y;
+        matrix->m[3][2] = pos_z;
+        return;
+    }
+
     matrix->m[0][0] = right_x;
-    matrix->m[1][0] = up_x;
-    matrix->m[2][0] = basis_x;
+    matrix->m[1][0] = result_up_x;
+    matrix->m[2][0] = result_basis_x;
     matrix->m[3][0] = pos_x;
     matrix->m[0][1] = right_y;
-    matrix->m[1][1] = up_y;
-    matrix->m[2][1] = basis_y;
+    matrix->m[1][1] = result_up_y;
+    matrix->m[2][1] = result_basis_y;
     matrix->m[3][1] = pos_y;
     matrix->m[0][2] = right_z;
-    matrix->m[1][2] = up_z;
-    matrix->m[2][2] = basis_z;
+    matrix->m[1][2] = result_up_z;
+    matrix->m[2][2] = result_basis_z;
     matrix->m[3][2] = pos_z;
     matrix->m[0][3] = 0.0f;
     matrix->m[1][3] = 0.0f;
@@ -763,6 +843,9 @@ void matrix_4x4_set_rotation_axis_angle(Mtxf *matrix, f32 angle, f32 x, f32 y, f
     f32 sin_x;
     f32 cos_z;
     f32 sin_z;
+    /* This helper is a legacy direction-basis constructor, not a general
+     * Rodrigues rotation despite its historical name. gunfire.c passes an
+     * angle of zero and relies on local -Z being the normalized muzzle axis. */
     guNormalize(&x, &y, &z);
     sine = sinf(angle);
     cosine = cosf(angle);
@@ -847,6 +930,12 @@ void matrix_4x4_normalize_rotation(Mtxf *matrix, Mtxf *result) {
     f32 norm = ((matrix->m[0][0] * matrix->m[0][0]) +
                 (matrix->m[1][0] * matrix->m[1][0]) +
                 (matrix->m[2][0] * matrix->m[2][0]));
+    norm = sqrtf(norm);
+    if (!(norm > EPSILON))
+    {
+        matrix_4x4_set_identity(result);
+        return;
+    }
     norm = 1.0f / norm;
     result->m[0][0] = (matrix->m[0][0] * norm);
     result->m[0][1] = (matrix->m[1][0] * norm);
@@ -873,6 +962,11 @@ void matrix_4x4_set_inverse_rotation_and_translation(Mtxf *matrix, Mtxf *result)
     f32 norm = (matrix->m[0][0] * matrix->m[0][0]) +
                (matrix->m[1][0] * matrix->m[1][0]) +
                (matrix->m[2][0] * matrix->m[2][0]);
+    if (!(norm > EPSILON))
+    {
+        matrix_4x4_set_identity(result);
+        return;
+    }
     norm = 1.0f / norm;
     result->m[0][0] = (matrix->m[0][0] * norm);
     result->m[0][1] = (matrix->m[1][0] * norm);
@@ -905,6 +999,11 @@ void matrix_4x4_invert_affine(Mtxf *matrix, Mtxf *result)
     f0 -= matrix->m[0][2] * matrix->m[1][1] * matrix->m[2][0];
     f0 -= matrix->m[0][1] * matrix->m[1][0] * matrix->m[2][2];
     f0 -= matrix->m[0][0] * matrix->m[1][2] * matrix->m[2][1];
+    if (!((f0 > EPSILON) || (f0 < -EPSILON)))
+    {
+        matrix_4x4_set_identity(result);
+        return;
+    }
     f0 = 1.0f / f0;
 
     result->m[0][0] = (matrix->m[1][1] * matrix->m[2][2] - matrix->m[1][2] * matrix->m[2][1]) * f0;
@@ -932,8 +1031,14 @@ void matrix_4x4_invert_affine(Mtxf *matrix, Mtxf *result)
 void matrix_4x4_invert(Mtxf *matrix, Mtxf *result) {
     s32 i, j;
     f32 inv_det;
+    f32 determinant = matrix_4x4_determinant(matrix);
+    if (!((determinant > EPSILON) || (determinant < -EPSILON)))
+    {
+        matrix_4x4_set_identity(result);
+        return;
+    }
     matrix_4x4_calc_adjugate(matrix, result);
-    inv_det = 1.0f / matrix_4x4_determinant(matrix);
+    inv_det = 1.0f / determinant;
     for (i = 0; i < 4; i++) {
         for (j = 0; j < 4; j++) {
             result->m[i][j] *= inv_det;

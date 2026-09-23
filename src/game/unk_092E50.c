@@ -11,6 +11,22 @@ f32 flt_CODE_bss_80079E84;
 //CODE.bss:80079E88
 f32 flt_CODE_bss_80079E88;
 
+/*
+ * The original display-list word update addresses the fourth prim-color
+ * command as an array of 32-bit N64 words.  A port Gfx is 16 bytes because
+ * its two words are pointer-sized, so that address instead lands in the
+ * second tile-size command and corrupts its coordinates.
+ */
+static void update_water_prim_lod(Gfx *setup, u32 lod)
+{
+#if defined(PORT)
+    setup[4].words.w0 = (setup[4].words.w0 & ~(uintptr_t)0xFFu)
+                       | ((uintptr_t)lod & 0xFFu);
+#else
+    ((u32 *)setup)[8] = (((u32 *)setup)[8] & ~0xFFu) | (lod & 0xFFu);
+#endif
+}
+
 
 // data
 //D:8003FCC0
@@ -265,13 +281,15 @@ void sub_GAME_7F092E50(void)
     MipMap2C_Something_Setup[2].loadtile.tl = flt_CODE_bss_80079E84;
     MipMap2C_Something_Setup[3].loadtile.sl = ((s32)flt_CODE_bss_80079E80 + 90) & 0xFF;
     MipMap2C_Something_Setup[3].loadtile.tl = ((s32)flt_CODE_bss_80079E84 + 150) & 0xFF;
-    ((u32 *) MipMap2C_Something_Setup)[8] = (((u32 *) MipMap2C_Something_Setup)[8] & ~0xFF) | (u32) ((sinf(flt_CODE_bss_80079E88) * 127.0f) + 128.0f);
+    update_water_prim_lod(MipMap2C_Something_Setup,
+                          (u32)((sinf(flt_CODE_bss_80079E88) * 127.0f) + 128.0f));
 
     MipMap2C_Something2_Setup[2].loadtile.sl = flt_CODE_bss_80079E80;
     MipMap2C_Something2_Setup[2].loadtile.tl = flt_CODE_bss_80079E84;
     MipMap2C_Something2_Setup[3].loadtile.sl = ((s32)flt_CODE_bss_80079E80 + 90) & 0xFF;
     MipMap2C_Something2_Setup[3].loadtile.tl = ((s32)flt_CODE_bss_80079E84 + 150) & 0xFF;
-    ((u32 *) MipMap2C_Something2_Setup)[8] = (((u32 *) MipMap2C_Something_Setup)[8] & ~0xFF) | (u32) ((sinf(flt_CODE_bss_80079E88) * 127.0f) + 128.0f);
+    update_water_prim_lod(MipMap2C_Something2_Setup,
+                          (u32)((sinf(flt_CODE_bss_80079E88) * 127.0f) + 128.0f));
 }
 
 

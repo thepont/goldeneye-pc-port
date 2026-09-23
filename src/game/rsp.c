@@ -28,12 +28,12 @@ s32 g_gfxDebugEntryData = 0;
 /**
  * Address 8004E9E4.
  */
-s32 g_gfxRdpOutputBufferEnd = 0;
+uintptr_t g_gfxRdpOutputBufferEnd = 0;
 
 /**
  * Address 8004E9E8.
  */
-s32 g_gfxRdpOutputBufferStart = 0;
+uintptr_t g_gfxRdpOutputBufferStart = 0;
 
 /**
  * Address 8004E9EC.
@@ -215,7 +215,8 @@ void rspInit(void)
 
 void rspAllocateBuffers(void)
 {
-    g_gfxRdpOutputBufferStart = mempAllocBytesInBank(RSP_MEMP_ALLOC_SIZE_BYTES, MEMPOOL_PERMANENT);
+    g_gfxRdpOutputBufferStart = (uintptr_t)mempAllocBytesInBank(
+        RSP_MEMP_ALLOC_SIZE_BYTES, MEMPOOL_PERMANENT);
     g_gfxRdpOutputBufferEnd = g_gfxRdpOutputBufferStart + RSP_MEMP_ALLOC_SIZE_BYTES;
 }
 
@@ -235,7 +236,8 @@ void rspGfxTaskStart(Gfx *firstGdl, Gfx *gdl, s32 arg2, OSMesg rspReplyMsg)
     task->t.ucode_boot = (u64*)rspbootTextStart;
     
     // u64 pointers, cast to x32 to avoid (sra _,_,0x3)
-    task->t.ucode_boot_size = ((s32)rspbootTextEnd - (s32)rspbootTextStart);
+    task->t.ucode_boot_size = (u32)((uintptr_t)rspbootTextEnd -
+                                    (uintptr_t)rspbootTextStart);
 
     if (rspbootTextStart);
     
@@ -247,8 +249,8 @@ void rspGfxTaskStart(Gfx *firstGdl, Gfx *gdl, s32 arg2, OSMesg rspReplyMsg)
     // task->ucode_data_size = SP_UCODE_DATA_SIZE, set in bss constructor
     // task->dram_stack = &g_gfxDramStack, set in bss constructor
     // task->dram_stack_size = SP_DRAM_STACK_SIZE8, set in bss constructor
-    task->t.output_buff = (u64 *)g_gfxRdpOutputBufferStart;
-    task->t.output_buff_size = (u64 *)g_gfxRdpOutputBufferEnd;
+    task->t.output_buff = (u64 *)(uintptr_t)g_gfxRdpOutputBufferStart;
+    task->t.output_buff_size = (u64 *)(uintptr_t)g_gfxRdpOutputBufferEnd;
     task->t.data_ptr = (u64 *) firstGdl;
     task->t.data_size = (s32) ((gdl - firstGdl) * sizeof (Gfx)); // u64 pointers, generates sra	t3,t2,0x3
     task->t.yield_data_ptr = (u64 *)&g_gfxYieldBuf;
@@ -263,7 +265,8 @@ void rspGfxTaskStart(Gfx *firstGdl, Gfx *gdl, s32 arg2, OSMesg rspReplyMsg)
     /* reply with this message */
     sctask->msg = rspReplyMsg;
 
-    sctask->framebuffer = (void *) ((struct GfxInfo_s *)g_gfxTaskSettingsList)->cfb;
+    sctask->framebuffer = (void *)(uintptr_t)
+        ((struct GfxInfo_s *)g_gfxTaskSettingsList)->cfb;
 
     osWritebackDCacheAll();
 
@@ -281,4 +284,3 @@ void rspGfxTaskStart(Gfx *firstGdl, Gfx *gdl, s32 arg2, OSMesg rspReplyMsg)
     g_gfxTaskSettingsList = (struct GfxInfo_s *)((u32)g_gfxTaskSettingsList ^ (u32) &g_gfxTaskSettings[0] ^ (u32) &g_gfxTaskSettings[1]);
 #endif
 }
-

@@ -266,7 +266,7 @@ coord3d D_80036408 = { 1.0f, 0.0f, 0.0f };
 //D:80036414
 struct bondstruct_unk_animation_related* D_80036414 =  0;
 //D:80036418
-s32 D_80036418 =  0;
+OSMesgQueue *D_80036418 =  0;
 //D:8003641C
 s32 D_8003641C =  0;
 
@@ -1317,4 +1317,3 @@ s32 sub_GAME_7F06C010(ModelHitEntry **entryptr, coord3d *modelRayStart, coord3d 
 
     return probably_damage_detail_blood_effect_related( entryptr, modelRayStart, modelRayDir, outModel, outNode);
 }
-

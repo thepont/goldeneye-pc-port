@@ -149,10 +149,12 @@ in the same change. Where a fix could not be made purely in `port/`, the minimal
   collision: `CCTVRecord` redeclares `pad` (s32 @0x80) which `ObjectRecord` also
   has (s16 @0x08). The game code's `->pad` (e.g. `setupCctv`, prop.c) is used as
   the **pad index**, which `New_CCTVRecord` stores at 0x08 (the *inherited* pad),
-  so IDO resolves the ambiguous `->pad` to the inherited one; CCTVRecord's own
-  `pad` (0x80, "lookpad") is never accessed by name. **Resolved:** under `-DPORT`
-  only, CCTVRecord's own `pad` is renamed to `lookpad` (layout byte-identical);
-  the N64 build keeps `pad` (IDO tolerates it).
+  so ordinary object setup uses the inherited field. **D307 corrected the
+  CCTV-specific assumption:** CCTVRecord's own `pad` (0x80, "lookpad") is the
+  camera-head target and must be accessed explicitly by the PC port. **Resolved:**
+  under `-DPORT` only, CCTVRecord's own `pad` is renamed to `lookpad` (layout
+  byte-identical), and `setupCctv` routes target-pad reads through
+  `cctvGetLookPad`; the N64 build keeps `pad` (IDO tolerates it).
 * **D2 — `port/shim/PR/gbi.h` needed an include guard.** The shim redefines the
   `Gfx` union members as little-endian `G*_le` typedefs. With no guard, a TU that
   includes it twice (directly + via another header) re-creates the anonymous
@@ -592,7 +594,7 @@ covers D24–D69; the log continues in §H (D32 procedure, D70–D121).
 | D304 | **Mouse sensitivity menu overhaul (user request, 2026-09-18): aim speed/turn speed sliders weren't "1:1", had too little range, and (follow-up) risked decoupling into a bad state; F10 menu also had a click-jump bug.** — full `## D304` entry at file tail | FIXED — see full entry for both the range/parity pass and the same-day follow-up (collapsed to a single `Input.MouseSensitivity` menu row + fixed `overlayUpdateScroll()`'s unconditional bottom-anchor, the actual cause of the reported "menu jumps to the setting below on click"). Build-verified (Windows) both passes; headless overlay smoke test clean after each. **Live F10 playtest done (2026-09-18): user confirmed the collapsed single-sensitivity menu works, the click-jump is gone, and the D251 bottom-row duplication no longer occurs.** |
 | D305 | **Steam Deck SIGSEGV on the v0.3.0 pre-release build (Cavern, early in the level, `Game.AllUnlocked` previously enabled on the session/save) — same exact FAULT ADDR 0x62 / `sndHandleEvent` signature as D285, reproduced AFTER D285's own lock fix was already live-verified crash-free on real hardware.** — full `## D305` entry at file tail | FIXED (defensive guard) — `sndHandleEvent`'s preempt-scan (`src/snd.c`) dereferenced its list-walk pointer before ever checking it for NULL (a do-while always runs its body once); D285's `osSetIntMask` lock only prevents another thread from emptying the list mid-scan, not a scan that starts with an already-empty list, so the crash could still happen even with that fix in place. Added the missing `iterState != NULL` guard before the loop, matching D255's established skip-instead-of-dereference precedent. Root desync mechanism (why pool-exhaustion accounting and the list can disagree) still not identified; `Game.AllUnlocked` correlation not proven, only reported. **Live-verified on the Deck (2026-09-18):** user ran two test sessions on Cavern with the updated build, plus toggled `Game.AllUnlocked` off then back on and relaunched — no crash in any of them. |
 | D306 | **Dam intro/truck wheels render with odd transparent-looking areas, possibly z-fighting (user QA, 2026-09-18).** — full `## D306` entry at file tail | OPEN — reported only, not investigated. Explicitly not for v0.3.0. |
-| D307 | **In-level security camera entities can be flipped facing the wrong direction (backwards) on some levels, e.g. Bunker (user QA, 2026-09-18) — NOT the player's view camera.** — full `## D307` entry at file tail | OPEN — reported only, not investigated. Explicitly not for v0.3.0. |
+| D307 | **In-level security camera entities can be flipped facing the wrong direction (backwards) on some levels, e.g. Bunker (user QA, 2026-09-18) — NOT the player's view camera.** — full `## D307` entry at file tail | PARTIAL — Bunker placement-pad/look-pad field selection is fixed and covered by a red→green ROM-free unit test; bounded live visual confirmation remains. Explicitly not for v0.3.0. |
 | D308 | **Occasional z-fighting confirmed on some levels' geometry, general/broader than the D306 truck-wheel instance (user QA, 2026-09-18).** — full `## D308` entry at file tail | OPEN — reported/confirmed by the user, not investigated. Explicitly not for v0.3.0; D306 may be one instance of this. |
 | D309 | **Complete non-self-recovering freeze (Windows) returning from Caverns to the intro screen — boss thread spins forever in `ai()` on `m_RunToBondPersistent` via a phantom `GotoNext(lblZero)` created by `chraiitemsize`'s `AI_PRINT` NUL-scan mis-sizing a stringless PRINT record (user report + live GDB diagnosis, 2026-09-18).** — full `## D309` entry at file tail | **FIXED via D310 — user-playtest-confirmed 2026-09-18** (Caverns→intro clean; the spin record itself observed resuming correctly in the post-fix probe log). The teardown-ordering open question (why PC presents the unreachable-Bond state) remains documented but is now harmless. |
 | D310 | **RULE-2-SIGNOFF: `chraiitemsize()` mis-sizes 1-byte `AI_PRINT` records (NUL-scans forward), corrupting AI execution for any list containing an active PRINT — fixes D309's freeze mechanism and the Caverns standing-still guards (`Stop`+`PRINT("wait")` mis-lands on EndList, re-executed every tick; user report 2026-09-18).** — full `## D310` entry at file tail | **FIXED — user-playtest-confirmed 2026-09-18** (v2: global-list-only sizing via `d310ItemSize`; guards resume, Trevelyan pathing intact, Caverns→intro clean; probe log verified both list classes). PD precedent: PRINT removed, slot 0xAD reassigned. |
@@ -11896,9 +11898,23 @@ do {
 
 ## D307 — In-level security camera entities can be flipped facing the wrong direction (backwards) on some levels, e.g. Bunker (user QA, 2026-09-18).
 
-**Reported only, not investigated, explicitly not for v0.3.0.** User playtest: on some levels (Bunker named specifically), the in-level **security camera props/entities** — the gameplay objects that spot the player and alert guards, not the player's own view camera — can end up facing backwards (the wrong direction) "for some reason." No further repro detail given (trigger condition, whether it self-corrects, whether it's tied to a specific spawn/setup path). No code read done. **Correction (same day): initially misread as the player's view camera — clarified by the user to mean the in-level security camera entities specifically.**
+**Investigation (2026-09-22):** Bunker CCTV records carry separate placement and
+look-at pads. Records 48, 50, 52, and 54 use placement pads `10018`–`10021`
+(bound pads) and look-at pads `88`, `95`, `80`, and `63` (ordinary pads). The PC
+port's renamed `CCTVRecord::lookpad` field was present in the converted record,
+but `setupCctv` still read the inherited `ObjectRecord::pad` for target-pad
+resolution. The resulting target was the camera's placement pad rather than the
+pad it was authored to face. This is a setup-data field-selection defect, not
+the matrix helper and not the player's view camera.
 
-**Status:** OPEN — logged, no investigation started. Deferred past v0.3.0 by user instruction.
+`tests/cctv_orientation_test.cpp` reproduces the four Bunker records as a
+ROM-free unit fixture. It was observed red before the fix and is green after
+`cctvGetLookPad` was added and `setupCctv` was changed to use it for target
+resolution. A bounded live/renderer capture is still needed before calling the
+visual issue fully closed.
+
+**Status:** PARTIAL — setup seam fixed and unit-tested; live visual confirmation
+pending. Deferred past v0.3.0 by user instruction.
 
 ## D308 — Occasional z-fighting confirmed on some levels' geometry, general/broader than the D306 truck-wheel instance (user QA, 2026-09-18).
 
@@ -12275,3 +12291,47 @@ Full campaign (or at minimum Silo → Caverns/Cradle) with **`GE_D322=1 GE_D204=
 **Remaining evidence.** A real two-controller interactive playtest is still owed: this session used deterministic fake controller channels and no second physical gamepad was available. Hardware-specific controller enumeration, button mappings, and the live death/failure journey therefore remain outside the automated evidence. The implementation is local-only; no network co-op was added.
 
 **Status:** **RULE-2-SIGNOFF / IMPLEMENTED — automated and fake-controller BDD verification passed (2026-09-22); hardware playtest remains owed.**
+
+## D324 — F10 overlay vector-font text was queued into the wrong frame batch (found by unit test, 2026-09-23).
+
+**Symptom/risk.** The F10 panel is emitted after the game's display-list
+transaction. Its vector labels were using the ordinary producer queue even
+though the current frame had already selected the game batch for rendering.
+The next game's build could overwrite those pending labels before the vector
+draw pass, leaving a panel with missing/stale text and making the existing
+font-flicker report (D314) look like a raster-font defect.
+
+**Red test.** `ge007_options_overlay` uses fake config, controller, video,
+bitmap-font, and vector-font ports. It failed when it required the overlay to
+use a current-frame vector queue rather than the ordinary pending queue. The
+same test also covers every registered graphics row, both 640x480 and
+440x330 logical canvases, full-viewport bitmap clipping, printable glyph
+strings, and controller A navigation.
+
+**Fix.** Added `gfx_vector_text_queue_late()`, a bounded append to the current
+render batch. `optionsoverlay.c` uses it only for text emitted after the game
+display-list build; if the batch is unavailable, it falls back to the bitmap
+renderer. `geVectorTextFrameQueueCurrent()` and
+`ge007_vector_text_frame` pin the current-versus-pending ownership boundary.
+
+**Status:** FIXED by deterministic unit/regression tests. This closes the
+identified vector-queue loss; a real GPU screenshot on the front end and in a
+level is still the final visual check for any remaining D314/D315 context or
+scaling issues.
+
+## D325 — F10 overlay bitmap fallback used vector advance metrics (found by unit test, 2026-09-23).
+
+**Symptom/risk.** If the vector command queue was unavailable for a frame, the
+overlay correctly fell back to the bitmap font for drawing, but right-aligned
+values and the centered close glyph had already been positioned using vector
+font advances. Different faces therefore shifted values and could make the
+fallback menu look misaligned or corrupted.
+
+**Red test and fix.** `ge007_options_overlay` makes the fake vector face wider,
+forces vector queuing to fail, and checks the bitmap positions for `ON` and
+`X`. The test failed at the vector-derived x positions. The overlay now
+chooses vector metrics only when the vector command is actually queued, and
+otherwise measures with the bitmap font for right-aligned and centered text.
+
+**Status:** FIXED by deterministic unit/regression tests. A live GPU screenshot
+is still useful for checking driver-specific raster quality.

@@ -38,6 +38,10 @@
 #define G_RDPFLUSH_EXT             0x43
 #define G_CLEAR_DEPTH_EXT          0x44
 #define G_SETSUBPIXELOFFSET_EXT    0x45
+#define G_SETWATERMATERIAL_EXT     0x46
+#define G_RENDERWATERCOMPOSITE_EXT 0x47
+#define G_BEGINWATERSCENE_EXT      0x48
+#define G_SUBMITWORLDWATER_EXT      0x49
 
 /* Extra geometry/aspect bits used by the PD ucode (dead for GE). */
 #define G_ASPECT_LEFT_EXT          0x00000010

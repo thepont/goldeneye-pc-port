@@ -137,7 +137,12 @@ void finalize_ramrom_on_hw(void)
     u8 *p;
     void *a1;
 
+#ifdef PORT
+    /* D66: keep the temporary stack address wide on 64-bit hosts. */
+    p = (u8 *)(uintptr_t)ALIGN16_a((uintptr_t)buffer);
+#else
     p = ALIGN16_a((s32)buffer);
+#endif
     p[0] = 0;
     p[1] = 0;
 
@@ -172,7 +177,8 @@ void save_ramrom_to_devtool(void)
     }
     
     sprintf(indyFileName, "replay/demo.%d", i);
-    indycommHostSaveFile(indyFileName, INDY_RAMROM_DEMO_POINTER, ptr_active_demofile->filesize);
+    indycommHostSaveFile(indyFileName, ptr_active_demofile->filesize,
+                         INDY_RAMROM_DEMO_POINTER);
 }
 
 
@@ -454,6 +460,12 @@ void copy_recorded_ramrom_registers_to_proper_place_ingame(ramromfilestructure *
     {
         selected_num_players = GE_COOP_MAX_PLAYERS;
     }
+    else if (state->mode == GAMEMODE_COOP && gamemode == GAMEMODE_SOLO)
+    {
+        /* A co-op replay can be resumed with one controller.  The mode
+         * fallback is solo, so its saved two-player count must follow it. */
+        selected_num_players = 1;
+    }
 #endif
     scenario = state->scenario;
     MP_stage_selected = state->mpstage_sel;
@@ -659,5 +671,3 @@ u32 check_ramrom_flags(void)
     }
     return 0;
 }
-
-

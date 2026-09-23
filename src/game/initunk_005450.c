@@ -31,6 +31,7 @@ void initModelHitEntryFreeList(void)
     g_ModelHitFreeList = entries;
 
     entries[0].next = &entries[1];
+    entries[0].prev = NULL;
 
     for (i = 1; i < MODELHITENTRIES_LEN - 1; i++)
     {
@@ -41,8 +42,10 @@ void initModelHitEntryFreeList(void)
 #if defined(__x86_64__)
     // D40: N64 g_ModelHitEntriesPenultimate labels entry 598 of the pool; on PC the
     // placeholder symbol is not emitted, so take the address directly.
+    ((ModelHitEntry *)g_ModelHitEntries)[MODELHITENTRIES_LEN - 1].next = NULL;
     ((ModelHitEntry *)g_ModelHitEntries)[MODELHITENTRIES_LEN - 1].prev = &entries[MODELHITENTRIES_LEN - 2];
 #else
+    ((ModelHitEntry *)g_ModelHitEntries)[MODELHITENTRIES_LEN - 1].next = NULL;
     ((ModelHitEntry *)g_ModelHitEntries)[MODELHITENTRIES_LEN - 1].prev = (ModelHitEntry *)g_ModelHitEntriesPenultimate;
 #endif
 }

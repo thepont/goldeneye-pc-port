@@ -2150,7 +2150,12 @@ typedef enum PORTALFLAGS
 
 #define BLANKSAVEDATA {0, 0, SAVEFLAGS_SET(0,0,BOND_BROSNAN,1), 0x00, 0xFF, 0xFF, DEFAULT_OPTIONS, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 
-#define MAX_PLAYER_COUNT 4
+/* Player-slot bounds supported by the multiplayer renderer. */
+#define MIN_MULTIPLAYER 2
+#define MAX_MULTIPLAYER 4
+
+/* Legacy name retained for save data and gameplay code that uses player slots. */
+#define MAX_PLAYER_COUNT MAX_MULTIPLAYER
 
 #define FOLDER_INVALID -1
 #define FOLDER1 0x0
@@ -4738,8 +4743,12 @@ typedef enum PROJECTILES
 #define getChrAIListID(ID)        ((ID) - 1025)
 #define getBGAIListID(ID)         ((ID) - 4096)
 
-    /* language file to slot allocation */
-#define getStringID(TEXTBANK, TEXTSLOT) ((TEXTBANK * 0x0400U) + TEXTSLOT)
+    /* Language file text IDs reserve a fixed-width slot field in each bank. */
+#define LANGUAGE_TEXT_SLOT_SHIFT 10
+#define LANGUAGE_TEXT_SLOT_COUNT (1U << LANGUAGE_TEXT_SLOT_SHIFT)
+#define LANGUAGE_TEXT_SLOT_MASK  (LANGUAGE_TEXT_SLOT_COUNT - 1U)
+#define getStringID(TEXTBANK, TEXTSLOT) \
+    ((TEXTBANK * LANGUAGE_TEXT_SLOT_COUNT) + TEXTSLOT)
 
     /* Image ID to RAM allocation */
 #define IMAGESEG(id)             0xABCD0000 | id

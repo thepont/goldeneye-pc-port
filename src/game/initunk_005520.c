@@ -47,6 +47,11 @@ void modelmgrAllocateModelSlots(s32 numobjs)
 {
     s32 i;
 
+    if (numobjs < 0)
+    {
+        numobjs = 0;
+    }
+
     g_MaxModelSlots = numobjs + MODEL_SPARE_SLOTS;
     
     g_ModelSlots = mempAllocBytesInBank(g_MaxModelSlots * sizeof(struct ModelSlot), MEMPOOL_STAGE);
@@ -75,6 +80,11 @@ void modelmgrAllocateAnimModelSlots(s32 numanimated)
 {
     s32 temp_t6;
     s32 i;
+
+    if (numanimated < 0)
+    {
+        numanimated = 0;
+    }
 
     g_MaxAnimModelSlots = numanimated + ANIM_MODEL_SPARE_SLOTS;
 

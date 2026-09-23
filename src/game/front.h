@@ -295,7 +295,11 @@ extern s32 spectrum_related_flag;
 extern s32 is_emulating_spectrum;
 extern s32 is_cheat_menu_available;
 extern u8 * ptr_logo_and_walletbond_DL;
+#ifdef PORT
+extern u8 * ptr_menu_videobuffer;
+#else
 extern s32 ptr_menu_videobuffer;
+#endif
 extern  Model * walletinst[];
 extern Lights1 gelogolight;
 extern Lights1 ninlogolight;

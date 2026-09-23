@@ -10,9 +10,10 @@
 #     goldeneye-pc-port-<VERSION>-linux-x86_64/        the unpacked bundle
 #     goldeneye-pc-port-<VERSION>-linux-x86_64.tar.gz  + .tar.gz.sha256
 #
-# The bundle contains ONLY: the engine executable, its SDL2 library, a README,
-# license texts, and the prepare-assets/ tool. It contains NO ROM and NO game
-# assets. SDL2 is bundled (copied next to the exe, whose rpath is set to
+# The bundle contains the engine executable, its SDL2 library, the OFL-licensed
+# vector UI font, a README, license texts, and the prepare-assets/ tool. It
+# contains NO ROM and NO Nintendo game assets. SDL2 is bundled (copied next to
+# the exe, whose rpath is set to
 # $ORIGIN) so the tarball runs as-is on any distro — including a sideloaded
 # Steam Deck — with nothing installed; zlib and libGL are expected from the
 # system (preinstalled everywhere that matters, incl. SteamOS). The script
@@ -42,6 +43,18 @@ mkdir -p "$OUT/licenses"
 cp "$EXE" "$OUT/"
 chmod +x "$OUT/$(basename "$EXE")"
 EXE_NAME="$(basename "$EXE")"
+
+# The UI font is not Nintendo game data. Keep it in the runtime data tree so
+# sysResolvePath("$S/fonts/...") finds it from both the repo and a packaged
+# executable launched outside its bundle directory.
+FONT_DIR="$REPO_ROOT/assets/fonts"
+FONT_NAME='ScienceGothic[CTRS,slnt,wdth,wght].ttf'
+[ -f "$FONT_DIR/$FONT_NAME" ] || {
+  echo "error: missing bundled UI font: $FONT_DIR/$FONT_NAME" >&2; exit 1; }
+mkdir -p "$OUT/data/fonts"
+cp "$FONT_DIR/$FONT_NAME" "$OUT/data/fonts/$FONT_NAME"
+cp "$FONT_DIR/OFL.txt" "$OUT/licenses/ScienceGothic-OFL.txt"
+echo "    + data/fonts/$FONT_NAME"
 
 # --- bundle SDL2 (turnkey on any distro / Steam Deck) ------------------
 # SDL2 is the engine's only non-universal runtime dep. Copy the exact file
@@ -120,7 +133,7 @@ cp "$CV" "$PREP/"
 chmod 755 "$PREP/ge007-convert"
 echo "    + prepare-assets/ge007-convert ($(du -h "$CV" | cut -f1))"
 
-# --- guard: no ROM / game data snuck in ------------------------------
+# --- guard: no ROM / Nintendo game data snuck in ----------------------
 if find "$OUT" -type f \( -iname '*.z64' -o -iname '*.n64' -o -iname '*.v64' \) | grep -q .; then
   echo "error: bundle contains a ROM image — aborting" >&2
   exit 1

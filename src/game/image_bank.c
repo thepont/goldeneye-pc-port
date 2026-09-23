@@ -88,8 +88,12 @@ struct sImageTableEntry *mpstageselimages;
 extern u8* _GlobalimagetableSegmentRomStart;
 
 
+#ifdef PORT
+void texSetBitstring(uintptr_t pos) {
+#else
 void texSetBitstring(s32 pos) {
-    img_curpos = pos;
+#endif
+    img_curpos = (u8 *)(uintptr_t)pos;
     img_curdatatable = 0;
     img_bitcount = 0;
 }

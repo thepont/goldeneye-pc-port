@@ -6,9 +6,9 @@
 #include "propobj.h"
 //this file may very well be a few different sub files
 
-MonitorRecord g_InitialMonitorAnimController = {&monAnim00Bond, 0, 0xFFFF, 0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1.0, 0.0};
-struct object_animation_controller g_InitialUnknownAnimController = {&monAnim34, 0, 0xFFFF, 0, 0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 1.0};
-struct object_animation_controller g_InitialTaserAnimController = {&monAnim35Taser, 0, 0xFFFF, 0, 0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 1.0};
+MonitorRecord g_InitialMonitorAnimController = {monAnim00Bond, 0, 0xFFFF, 0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1.0, 0.0};
+struct object_animation_controller g_InitialUnknownAnimController = {monAnim34, 0, 0xFFFF, 0, 0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 1.0};
+struct object_animation_controller g_InitialTaserAnimController = {monAnim35Taser, 0, 0xFFFF, 0, 0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 1.0};
 
 f32 unused_8002a3bc = 0.0f;
 f32 g_DoorScale = 1.0f;
@@ -48,7 +48,7 @@ void init_load_objpos_table(void)
     g_ActivePropsTail = g_ActivePropsHead = NULL;
     g_OnScreenPropCount = 0;
     g_OnScreenPropList[0] = NULL;
-    g_LastOnScreenProp = (PropRecord *) g_OnScreenPropList;
+    g_LastOnScreenProp = (PropRecord **)g_OnScreenPropList;
     g_FreeProps = g_Props;
 
     for (i = 0; i < (MAX_PROPS - 1); i++)
@@ -70,7 +70,7 @@ void alloc_lookup_buffers(void)
 
     ptr_list_object_lookup_indices = (s16 *)mempAllocBytesInBank(PTR_LIST_OBJECT_LOOKUP_INDICES_LEN * sizeof(s16), MEMPOOL_STAGE);
     RoomPropListBlockIndices       = (s16 *)mempAllocBytesInBank((((g_MaxNumRooms * 4) + 0xF) | 0xF) ^ 0xF, MEMPOOL_STAGE);
-    RoomPropListBlocks             = (s16 *)mempAllocBytesInBank(BSS_8007161C_LEN * sizeof(struct roomproplistblock), MEMPOOL_STAGE);
+    RoomPropListBlocks             = (struct roomproplistblock *)mempAllocBytesInBank(BSS_8007161C_LEN * sizeof(struct roomproplistblock), MEMPOOL_STAGE);
 
     ptr_list_object_lookup_indices[0] = -1;
 
@@ -186,9 +186,9 @@ void initSetLevelLoadPropLockDoor(struct LockDoorRecord *arg0)
  * Called from proplvreset2 when PROPDEF type is PROPDEF_SAFE_ITEM.
  * Address 0x7F001940.
 */
-void initSetLevelLoadPropSafeItem(struct ObjectRecord *arg0)
+void initSetLevelLoadPropSafeItem(struct SafeObjectRecord *arg0)
 {
-    arg0->prop = g_LevelLoadPropSafeItem;
+    arg0->next = g_LevelLoadPropSafeItem;
     g_LevelLoadPropSafeItem = arg0;
 }
 
@@ -223,4 +223,3 @@ void initialize_proxy_mine_table(void)
         proxy_mine_table[i] = NULL;
     }
 }
-

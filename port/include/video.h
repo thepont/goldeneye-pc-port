@@ -37,6 +37,11 @@ void videoEndFrame(void);
  * loop from main(). Exits the process on QUIT/ESC/close. */
 void videoPumpEvents(void);
 
+/* Single SDL-event dispatch authority. The SDL adapter calls this on the
+ * render thread when Wayland owns the display; the host pump calls the same
+ * function for X11/other backends. */
+void videoHandleSdlEvent(const SDL_Event *event);
+
 /* The game's native video mode (NTSC 640x480, PAL 640x400). fast3d scales
  * N64 screen coordinates into window pixels using this. */
 void videoUpdateNativeResolution(s32 w, s32 h);

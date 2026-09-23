@@ -8,6 +8,9 @@
 /* D50: font segments are re-laid out from the N64 ROM layout to the PC C
  * layout (see romdataFixupFont). */
 #include "romdata.h"
+#include "text_measure_policy.h"
+#include "vector_text.h"
+#include "vector_text_route_policy.h"
 #include <stdio.h>
 #include <stdlib.h>
 #endif
@@ -428,7 +431,7 @@ Gfx *textRender(Gfx *gdl, s32 *x, s32 *y, char *text,
      * drawn; the PC menu flow does not yet, so a missing briefing/objective
      * string reaches textRender as NULL and faults in the `*text` scan.
      * Degrade to "draw nothing" like an empty string would. */
-    if (text == NULL) {
+    if (text == NULL || chars == NULL || font == NULL) {
         return gdl;
     }
 #endif
@@ -697,7 +700,7 @@ Gfx *textRenderOutlined(Gfx *gdl, s32 *x, s32 *y,
     s32 prevchar;
 
 #ifdef PORT
-    if (text == NULL) { /* D143 - see textRender */
+    if (text == NULL || chars == NULL || font == NULL) { /* D143 - see textRender */
         return gdl;
     }
 #endif
@@ -776,7 +779,25 @@ void textMeasure(s32 *textheight, s32 *textwidth, char *text, struct fontchar *f
 	*textwidth = 0;
 
 #ifdef PORT
-    if (text == NULL) { /* D143 - see textRender */
+    if (!geTextMeasureInputsCurrentlyAccepted(text, font1, font2)) {
+        /* D143 - see textRender. The extracted current guard intentionally
+         * covers only the text pointer; D129's red contract also requires
+         * the two font-bank pointers to be validated. */
+        return;
+    }
+    if (geVectorTextCanReplaceBitmap(gfx_vector_text_enabled(), text)) {
+        /* Keep wrapping and centering tied to the same outline face that the
+         * enhanced front end will draw. The legacy height convention is
+         * retained because callers use it only for line stepping. */
+        s32 vector_lineheight = lineheight;
+        if (vector_lineheight == 0) {
+            vector_lineheight = gfx_vector_text_hud_height(1);
+        }
+        if ((j_text_trigger) && (vector_lineheight < 14)) {
+            vector_lineheight = 14;
+        }
+        *textwidth = gfx_vector_text_measure(text);
+        *textheight = geVectorTextMeasureHeight(text, vector_lineheight);
         return;
     }
 #endif
@@ -856,7 +877,6 @@ void textWrap(s32 wrapwidth, char *src, char *dst, struct fontchar *chars, struc
 	s32 v1;
 	s32 i;
 	u32 stack;
-	char curword[32];
 
 #ifdef PORT
     if (src == NULL) { /* D143 - see textRender */
@@ -868,6 +888,34 @@ void textWrap(s32 wrapwidth, char *src, char *dst, struct fontchar *chars, struc
 #endif
 
     while (more == 1) {
+	#ifdef PORT
+		/* A fixed 32-byte word buffer lets long briefing/objective words
+		 * overwrite textWrap's stack frame.  Determine the encoded word size
+		 * first, then use an owned buffer for the exact byte span. */
+		size_t wordcapacity = 0;
+		const char *wordscan = src;
+		char *curword;
+
+		while (*wordscan > ' ') {
+			wordscan++;
+			wordcapacity++;
+			if ((unsigned char)wordscan[-1] >= 0x80) {
+				wordscan++;
+				wordcapacity++;
+			}
+		}
+
+		curword = malloc(wordcapacity + 1);
+		if (curword == NULL) {
+			if (dst != NULL) {
+				dst[0] = '\0';
+			}
+			return;
+		}
+	#else
+		char curword[32];
+	#endif
+
 		// Load the next word
 		wordwidth = 0;
 		wordlen = 0;
@@ -890,8 +938,8 @@ void textWrap(s32 wrapwidth, char *src, char *dst, struct fontchar *chars, struc
             }
         }
         
-        // Null terminate the word
-        curword[wordlen] = '\0';
+		// Null terminate the word
+		curword[wordlen] = '\0';
 
         textMeasure(&wordheight, &wordwidth, curword, chars, font, 0);
 
@@ -958,7 +1006,7 @@ void textWrap(s32 wrapwidth, char *src, char *dst, struct fontchar *chars, struc
 			*dst = ' ';
 			dst++;
         }
-        else if (*src == '\0')
+		else if (*src == '\0')
         {
             more = 0;
 
@@ -981,8 +1029,11 @@ void textWrap(s32 wrapwidth, char *src, char *dst, struct fontchar *chars, struc
 
 			// Write the null terminator
 			*dst = '\0';
-        }
+		}
 
+	#ifdef PORT
+		free(curword);
+	#endif
         src++;
     }
 }
@@ -996,5 +1047,3 @@ void sub_GAME_7F0AEF0C(s32 arg0, s32 arg1, s32 arg2, s32 arg3) {
 u32 sub_GAME_7F0AEF20(u32 param_1,u32 param_2){
   return param_1;
 }
-
-

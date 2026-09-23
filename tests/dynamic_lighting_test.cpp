@@ -14,6 +14,11 @@ static bool near(float actual, float expected, float epsilon = 0.0001f)
 
 int main()
 {
+    if (geWorldLightingEnabled(0) != 0 || geWorldLightingEnabled(1) == 0) {
+        std::fprintf(stderr, "dynamic lighting toggle contract failed\n");
+        return 1;
+    }
+
     const GeDynamicLight light = {{0.0f, 0.0f, 0.0f}, 500.0f, 1.0f};
     const float facing[3] = {0.0f, 0.0f, 1.0f};
     const float away[3] = {0.0f, 0.0f, -1.0f};

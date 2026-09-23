@@ -47,6 +47,71 @@ Needs CMake + SDL2 + zlib + OpenGL, and must run from the MSYS2 MINGW64 shell
 
 Run `/linkcheck` for this sweep. Record new findings in `docs/dev/findings.md` §F/§H style (next `Dxx` label after the last used) and add the label to the §F index.
 
+## Test design and maintenance
+
+Tests are executable behavioral contracts, not snapshots of the current
+implementation. A small refactor that preserves the player-visible behavior
+should not require rewriting its unit tests.
+
+### TDD/BDD shape
+
+For a behavior change, write the smallest test that describes the failure in
+Given/When/Then terms, run it red, implement the smallest coherent change, run
+it green, and then refactor. A regression test must reproduce the defect at the
+lowest useful test level; do not start the game when a deterministic policy or
+fake hardware boundary can demonstrate the same failure. Keep the end-to-end
+test for the complete journey and integration between owned boundaries.
+
+Every unit test should make its seam visible:
+
+- Given: a named fixture or builder with only the relevant inputs set;
+- When: a public function, policy, adapter, or command is invoked;
+- Then: a return value, state transition, emitted event/command, persisted
+  value, or other externally observable invariant is asserted.
+
+### Resilience rules
+
+- Assert meaning, not arrangement. Prefer “both viewports are positive and do
+  not overlap” to a particular helper call sequence, buffer address, loop
+  count, or private temporary value.
+- Assert stable protocol fields exactly only when they are the compatibility
+  contract: ROM/ABI layout, serialized bytes, GBI opcodes, public status codes,
+  or documented log/event schema. Decode such output into semantic fields
+  before asserting it; do not snapshot unrelated padding or formatting.
+- For floating-point math, use a domain-appropriate tolerance and separately
+  test invariants such as monotonicity, symmetry, finite output, and boundary
+  inclusivity. Do not copy the production formula into the test as its oracle.
+- Use builders, named fixtures, and reset helpers. Keep each test independent;
+  never depend on execution order or leaked global state. Restore environment
+  variables and fake resources in the same test that changes them.
+- Fake operating-system, GPU, controller, clock, filesystem, and network
+  boundaries. Do not mock private functions or duplicate the production
+  algorithm inside a fake. A fake records and validates the boundary inputs and
+  returns deterministic results, including injected failures where relevant.
+- Cover the boundary matrix: empty and malformed input, minimum/maximum
+  values, equality at thresholds, just-inside/just-outside values, duplicate
+  events, repeated calls, state transitions, restart/resume, cleanup, and
+  side-effect failure. Use property, permutation, or table-driven tests when a
+  matrix is larger than a few examples.
+- Keep one behavioral reason per test. Test names should describe the contract
+  and failure, not the implementation function or source line. Shared setup
+  belongs in a helper only when it has one clear domain meaning.
+- Do not use source-text matching as a substitute for runtime behavior. Static
+  source contracts are acceptable only for build/porting boundaries that cannot
+  be exercised safely; they must be paired with a real unit or integration
+  test where an executable seam exists.
+- Treat coverage as a missing-behavior detector, not a target to satisfy with
+  meaningless assertions. If a branch is unreachable by contract, document
+  why; if it is reachable, add a boundary example or a generated/property
+  case. Coverage gates must run the same deterministic tests developers run.
+
+When a harmless refactor breaks a test, first ask whether the assertion is
+coupled to an implementation detail. Preserve the behavioral assertion and
+move the seam outward or improve the fixture; do not weaken a genuine
+compatibility assertion merely to make the test pass. Change the test itself
+when the documented behavior or protocol changes, and record that contract
+change in the same patch.
+
 ## Phase status (summary — see README + `docs/dev/findings.md` for detail)
 
 - **Phase 0–1.5:** done. Build system, boot chain, OS-shim layer, fast3d

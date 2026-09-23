@@ -66,6 +66,9 @@
 #include <assets/image_externs.h>
 #include <PR/gbi.h>
 #include <gbi_extension.h>
+#ifdef PORT
+#include <stdint.h>
+#endif
 
 #define LIGHTFIXTURE_TABLE_MAX 0x64
 #define DARKENED_LIGHT_TABLE_MAX 0x200
@@ -182,12 +185,20 @@ Vtx *lightFindVertexBaseForTri(Gfx *gfx, s32 room_index)
         gfx--; 
     }
 
-    ret = gfx->dma.addr;
+    ret = (Vtx *)(uintptr_t)gfx->dma.addr;
 
+#ifdef PORT
+    if (((uintptr_t)ret & 0xFF000000u) == 0x0E000000u)
+    {
+        ret = (Vtx *)((u8 *)g_BgRoomInfo[room_index].vertices +
+                      ((uintptr_t)ret & 0xFFFFFFu));
+    }
+#else
     if (((s32) ret & 0xFF000000) == 0x0E000000) 
     {
         ret = (s32)g_BgRoomInfo[room_index].vertices + ((s32) ret & 0xFFFFFF);
     }
+#endif
 
     return ret;
 }
@@ -195,33 +206,72 @@ Vtx *lightFindVertexBaseForTri(Gfx *gfx, s32 room_index)
 
 void extract_vertex_indices_from_triangle(Gfx* gfx, u32 tri_type, s32* idx1, s32* idx2, s32* idx3)
 {
+    /* Keep malformed display-list input from turning into an arbitrary vertex
+     * read.  Valid encodings overwrite all three values below. */
+    *idx1 = 0;
+    *idx2 = 0;
+    *idx3 = 0;
+
     switch (tri_type) 
     {
         case 0:
+#ifdef PORT
+            /* gSP1Triangle packs v0, v1 and v2 into w0 in that order.  The
+             * N64 Gtri bitfields are a big-endian view and are reversed by
+             * the little-endian PC shim, so decode the command word itself. */
+            *idx1 = (s32)(((gfx->words.w1 >> 16) & 0xFFu) / 10u);
+            *idx2 = (s32)(((gfx->words.w1 >> 8) & 0xFFu) / 10u);
+            *idx3 = (s32)((gfx->words.w1 & 0xFFu) / 10u);
+#else
             *idx1 = (s32) gfx->tri.tri.v[0] / 10;
             *idx2 = (s32) gfx->tri.tri.v[1] / 10;
             *idx3 = (s32) gfx->tri.tri.v[2] / 10;
+#endif
             break;
         // unsure of how to cleanly access the below versions
         case 1:
+#ifdef PORT
+            *idx1 = (s32)(gfx->words.w1 & 0xFu);
+            *idx2 = (s32)((gfx->words.w1 >> 4) & 0xFu);
+            *idx3 = (s32)(gfx->words.w0 & 0xFu);
+#else
             *idx1 = ((u32*)gfx)[1] & 0xF;
             *idx2 = ((((u8*)gfx)[7]) & 0xFFFFFFFFu) >> 4;
             *idx3 = ((s32*)gfx)[0] & 0xF;
+#endif
             break;
         case 2:
+#ifdef PORT
+            *idx1 = (s32)((gfx->words.w1 >> 8) & 0xFu);
+            *idx2 = (s32)((gfx->words.w1 >> 12) & 0xFu);
+            *idx3 = (s32)((gfx->words.w0 >> 4) & 0xFu);
+#else
             *idx1 = ((u8*)gfx)[6] & 0xF;
             *idx2 = ((((u16*)gfx)[3]) & 0xFFFFFFFFu) >> 0xC;
             *idx3 = ((((u8*)gfx)[3]) & 0xFFFFFFFFu) >> 4;
+#endif
             break;
         case 3:
+#ifdef PORT
+            *idx1 = (s32)((gfx->words.w1 >> 16) & 0xFu);
+            *idx2 = (s32)((gfx->words.w1 >> 20) & 0xFu);
+            *idx3 = (s32)((gfx->words.w0 >> 8) & 0xFu);
+#else
             *idx1 = ((u16*)gfx)[2] & 0xF;
             *idx2 = ((((u8*)gfx)[5]) & 0xFFFFFFFFu) >> 4;
             *idx3 = ((u8*)gfx)[2] & 0xF;
+#endif
             break;
         case 4:
+#ifdef PORT
+            *idx1 = (s32)((gfx->words.w1 >> 24) & 0xFu);
+            *idx2 = (s32)((gfx->words.w1 >> 28) & 0xFu);
+            *idx3 = (s32)((gfx->words.w0 >> 12) & 0xFu);
+#else
             *idx1 = ((u8*)gfx)[4] & 0xF;
             *idx2 = ((u32*)gfx)[1] >> 0x1C;
             *idx3 = ((((u16*)gfx)[1]) & 0xFFFFFFFFu) >> 0xC;
+#endif
             break;
     }
 }
@@ -281,7 +331,13 @@ void darken_vertex_in_room(Vtx * vertex, s32 room_index)
     if (darkened_light_table_contains_vertex(vertex, room_index) != 0) { return; }
 
     // weird memory stuff going on here
+#ifdef PORT
+    vtx_index = (s32)(((uintptr_t)vertex -
+                        (uintptr_t)g_BgRoomInfo[room_index].vertices) /
+                       sizeof(Vtx));
+#else
     vtx_index = ((u32)vertex - (u32)g_BgRoomInfo[room_index].vertices) >> 4;
+#endif
 
     darkened_light_table[cur_entry_darkened_light_table].room_index = (u16) room_index;
     darkened_light_table[cur_entry_darkened_light_table].vtx_index = vtx_index;
@@ -306,7 +362,13 @@ s32 darkened_light_table_contains_vertex(Vtx * vertex, s32 room_index)
     s32 i;
 
     // weird memory stuff going on here
+#ifdef PORT
+    vtx_index = (u32)(((uintptr_t)vertex -
+                       (uintptr_t)g_BgRoomInfo[room_index].vertices) /
+                      sizeof(Vtx));
+#else
     vtx_index = ((u32)vertex - (u32)g_BgRoomInfo[room_index].vertices) >> 4;
+#endif
 
     for (i = 0; i < DARKENED_LIGHT_TABLE_MAX; i++)
     {
@@ -620,4 +682,3 @@ void clear_light_fixturetable_in_room(s32 room_index)
 
     current_light_fixture_room = room_index;
 }
-

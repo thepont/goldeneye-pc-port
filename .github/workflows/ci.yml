@@ -44,10 +44,17 @@ concurrency:
 #                   Does NOT compile; running on ubuntu is NOT a claim the port
 #                   works on Linux.
 #
+#   unit-coverage — ubuntu, deterministic unit-only gate. Builds the pure
+#                   policy/controller tests with GCC/gcov, requires 100% line
+#                   and branch coverage for every policy header, and verifies
+#                   the defect-contract suite as green regressions. It never
+#                   launches the game or needs a ROM/assets.
+#
 #   windows-build — windows/MSYS2, the real supported platform. Compiles and
 #                   links the full executable, then packages the distributable
-#                   bundle (exe + runtime DLLs + README + licenses, NO ROM /
-#                   assets) via tools_pc/bundle-win.sh and uploads it. Neither
+#                   bundle (exe + runtime DLLs + vector UI font + README +
+#                   licenses, NO ROM / Nintendo game assets) via
+#                   tools_pc/bundle-win.sh and uploads it. Neither
 #                   the ROM nor extracted assets are needed to BUILD (they are
 #                   runtime-only), so CI builds but never runs the port.
 #
@@ -164,6 +171,45 @@ jobs:
 
       - name: CMake configure (ntsc-final)
         run: cmake -S . -B build-ntsc -DROMID=ntsc-final
+
+  # Deterministic TDD gate for unit-owned policy seams. The full executable is
+  # deliberately not instrumented: it needs a ROM/assets runtime and would
+  # turn coverage into an unattended integration/environment measurement.
+  unit-coverage:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-14 g++-14 cmake \
+            libsdl2-dev zlib1g-dev libgl1-mesa-dev glslang-tools xvfb
+
+      - name: Configure unit coverage
+        run: |
+          cmake -S . -B build-coverage \
+            -DROMID=ntsc-final \
+            -DBUILD_TESTING=ON \
+            -DGE007_ENABLE_COVERAGE=ON \
+            -DGE007_COVERAGE_MIN_LINES=100 \
+            -DGE007_COVERAGE_MIN_BRANCHES=100 \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14
+
+      - name: Run unit coverage gate
+        run: cmake --build build-coverage --target ge007_coverage -j"$(nproc)"
+
+      - name: Run software OpenGL shader probe
+        run: ctest --test-dir build-coverage --output-on-failure \
+          -R '^ge007_ascension_postfx_gpu$'
 
   # Linux (Ubuntu, system GCC) compile job. Unlike `validate` this actually
   # runs `cmake --build`, so it surfaces the GCC-on-Linux strictness gaps that
@@ -385,7 +431,7 @@ jobs:
   # publishing. This job — and only this job — gets contents: write.
   release:
     if: github.ref_type == 'tag'
-    needs: [ changes, validate, windows-build, linux-build ]
+    needs: [ changes, validate, unit-coverage, windows-build, linux-build ]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

@@ -26,6 +26,11 @@ void init_guards(void) {
 void alloc_init_GUARDdata_entries(s32 count)
 {
     s32 i;
+
+    if (count < 0)
+    {
+        count = 0;
+    }
     
     g_NumChrSlots = count + 10; //special guards?
 
@@ -64,8 +69,10 @@ void bodiesReset(u32 stagenum)
         };
     }
 #else
-    current_random_male_head = randomGetNext() % num_male_heads;
-    current_random_female_head = randomGetNext() % num_female_heads;
+    current_random_male_head =
+        num_male_heads == 0 ? 0 : randomGetNext() % num_male_heads;
+    current_random_female_head =
+        num_female_heads == 0 ? 0 : randomGetNext() % num_female_heads;
 #endif
-    current_random_body = randomGetNext() % num_bodies;
+    current_random_body = num_bodies == 0 ? 0 : randomGetNext() % num_bodies;
 }

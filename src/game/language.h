@@ -14,6 +14,24 @@ struct jpncacheitem {
 	u16 codepoint : 14;
 };
 
+/* The Japanese glyph cache is a fixed 124-entry table.  A cache entry
+ * reserves eight jpncharpixels records, while the serialized ROM copy sizes
+ * differ between single-byte and multibyte glyphs. */
+enum
+{
+    LANGUAGE_BANK_COUNT = 45,
+    JPN_CACHE_ENTRY_COUNT = 0x7c,
+	JPN_CACHE_PIXEL_STRIDE = 8,
+	JPN_CACHE_PIXEL_BYTES = 0x2e80,
+	JPN_CACHE_ITEM_STORAGE_BYTES = 0x100,
+	JPN_CODEPOINT_SHIFT = 1,
+	JPN_MULTIBYTE_FLAG = 0x2000,
+	JPN_MULTIBYTE_CODEPOINT_MASK = 0x1fff,
+	JPN_SINGLE_GLYPH_ROM_BYTES = 0x60,
+	JPN_MULTIBYTE_GLYPH_ROM_BYTES = 0x80,
+	LANG_BANK_LOAD_SIZE_HINT = 0x100
+};
+
 
 extern s32 j_text_trigger;
 

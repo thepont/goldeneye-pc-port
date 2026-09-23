@@ -10,11 +10,11 @@
 #     goldeneye-pc-port-<VERSION>-win64/        the unpacked bundle
 #     goldeneye-pc-port-<VERSION>-win64.zip     + .zip.sha256
 #
-# The bundle contains ONLY: the engine executable, its MinGW / SDL2 / zlib
-# runtime DLLs, a README, and license texts. It contains NO ROM and NO game
-# assets (textures, audio, models, levels, text) — the user supplies those at
-# runtime from a ROM they own. The script hard-fails if a ROM image or an
-# oversized blob ends up inside the bundle.
+# The bundle contains the engine executable, its MinGW / SDL2 / zlib runtime
+# DLLs, the OFL-licensed vector UI font, a README, and license texts. It
+# contains NO ROM and NO Nintendo game assets (textures, audio, models, levels,
+# text) — the user supplies those at runtime from a ROM they own. The script
+# hard-fails if a ROM image or an oversized blob ends up inside the bundle.
 #
 set -euo pipefail
 
@@ -34,6 +34,18 @@ echo "==> Bundling $EXE  ->  $NAME"
 rm -rf "$OUT"
 mkdir -p "$OUT/licenses"
 cp "$EXE" "$OUT/"
+
+# The UI font is not Nintendo game data. Keep it in the runtime data tree so
+# sysResolvePath("$S/fonts/...") finds it from both the repo and a packaged
+# executable launched outside its bundle directory.
+FONT_DIR="$REPO_ROOT/assets/fonts"
+FONT_NAME='ScienceGothic[CTRS,slnt,wdth,wght].ttf'
+[ -f "$FONT_DIR/$FONT_NAME" ] || {
+  echo "error: missing bundled UI font: $FONT_DIR/$FONT_NAME" >&2; exit 1; }
+mkdir -p "$OUT/data/fonts"
+cp "$FONT_DIR/$FONT_NAME" "$OUT/data/fonts/$FONT_NAME"
+cp "$FONT_DIR/OFL.txt" "$OUT/licenses/ScienceGothic-OFL.txt"
+echo "    + data/fonts/$FONT_NAME"
 
 # --- runtime DLLs ---------------------------------------------------------
 # Explicit allowlist; the closure check below fails the build if the exe needs

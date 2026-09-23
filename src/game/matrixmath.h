@@ -4,12 +4,24 @@
 #include <ultra64.h>
 #include <bondtypes.h>
 
+/* This is gameplay-side N64-compatible math, not an OpenGL adapter. The
+ * renderer consumes the resulting Mtxf values later; replacing these calls
+ * with GL state/matrix calls would change the game's row/column and fixed-
+ * point conversion semantics and would make collision/camera behavior depend
+ * on a graphics context. */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void mtx4RotateVecInPlace(Mtxf *matrix, struct coord3d *vector);
+void matrix_4x4_set_lookat(Mtxf *matrix, f32 eye_x, f32 eye_y, f32 eye_z,
+                           f32 forward_x, f32 forward_y, f32 forward_z,
+                           f32 up_x, f32 up_y, f32 up_z);
 void matrix_4x4_set_lookat_target(Mtxf *arg0, f32 arg1, f32 arg2, f32 arg3, f32 arg4, f32 arg5, f32 arg6, f32 arg7, f32 arg8, f32 arg9);
 
 void matrix_4x4_multiply(Mtxf *lhs, Mtxf *rhs, Mtxf *result);
 void matrix_4x4_set_position(struct coord3d *position, Mtxf *matrix);
-void matrix_4x4_set_lookat(Mtxf *arg0, f32 arg1, f32 arg2, f32 arg3, f32 arg4, f32 arg5, f32 arg6, f32 arg7, f32 arg8, f32 arg9);
 u32 matrix_4x4_calc_depth_scale(f32 arg0, f32 arg1);
 void matrix_4x4_calc_adjugate(Mtxf *arg0, Mtxf *arg1);
 
@@ -23,6 +35,7 @@ void matrix_4x4_multiply_homogeneous(Mtxf *lhs, Mtxf *rhs, Mtxf *result);
 
 void matrix_4x4_f32_to_s32(f32 mf[4][4], s32 ms[4][4]);
 void matrix_4x4_multiply_homogeneous_in_place(Mtxf *lhs, Mtxf *rhs);
+void matrix_4x4_rotate_vector(Mtxf *matrix, struct coord3d *vector, struct coord3d *result);
 void mtx4TransformVecInPlace(Mtxf *matrix, struct coord3d *vector);
 void matrix_4x4_set_identity(Mtxf *matrix);
 void matrix_4x4_set_rotation_around_x(f32 angle, Mtxf *matrix);
@@ -49,6 +62,17 @@ void matrix_4x4_set_rotation_axis_angle(Mtxf *matrix, f32 angle, f32 x, f32 y, f
 void matrix_4x4_set_rotation_inverse(Mtxf *rotation, Mtxf *transpose);
 void matrix_4x4_transform_vector(Mtxf *matrix, struct coord3d *vector, struct coord3d *result);
 void matrix_row_3_scalar_multiply(f32 scalar, f32 *matrix);
+void matrix_4x4_7F058274(Mtxf *arg0, Mtxf *arg1, Mtxf *arg2);
+void matrix_4x4_normalize_rotation(Mtxf *matrix, Mtxf *result);
+void matrix_4x4_invert_affine(Mtxf *matrix, Mtxf *result);
+void matrix_4x4_invert(Mtxf *matrix, Mtxf *result);
+void matrix_4x4_set_projection(Mtxf *matrix, u16 *depth_scale, f32 fovy,
+                               f32 aspect, f32 near, f32 far, f32 scale);
+void matrix_4x4_7F059044(Mtxf *arg0, Mtx *arg1);
+void matrix_4x4_7F05914C(Mtx *arg0, Mtxf *arg1);
+void sub_GAME_7F059244(Mtx *src, Mtx *dst);
+void sub_GAME_7F059334(Mtx *src, Mtx *dst);
+void matrix_4x4_7F059D30(Mtxf *matrix);
 
 // tenative guess
 void sub_GAME_7F058E78(Mtxf *arg0, Mtxf *arg1);
@@ -59,6 +83,12 @@ void matrix_4x4_multiply_homogeneous_eu(f32 lhs[3][3], f32 rhs[3][3], f32 result
 /* matrixmath_misc.h */
 
 void vec3Lerp(vec3d *x, vec3d *y, f32 scaler, vec3d *result);
+f32 scalarCatmullRomInterp(f32 p0, f32 p1, f32 p2, f32 p3, f32 fraction);
 void coord3dCubicSplineInterp(coord3d *prev, coord3d *start, coord3d *end, coord3d *next, f32 fraction, f32 tangentScale, coord3d *result);
 void coord3dCatmullRomInterp(coord3d *p0, coord3d *p1, coord3d *p2, coord3d *p3, f32 fraction, coord3d *result);
+f32 scalarCubicHermiteInterp(f32 start, f32 end, f32 startTangent, f32 endTangent, f32 fraction);
+
+#ifdef __cplusplus
+}
+#endif
 #endif

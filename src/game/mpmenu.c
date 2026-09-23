@@ -216,22 +216,20 @@ s32 mpFindMinInt(s32 numplayers, s32 value0, s32 value1, s32 value2, s32 value3)
 /**
  * Returns the index of the player with the highest value.
  * 
- * @bug: aux is s32 so each time it's set to one of the values, the decimal portion gets truncated.
- * The first comparison is safe from this since it doesn't use aux, but the rest are impacted.
  */
 s32 mpFindMaxFloat(s32 numplayers, f32 value0, f32 value1, f32 value2, f32 value3)
 {
-    s32 aux;
+    f32 aux;
     s32 result;
  
     if ((value0 < value1) || ((value1 == value0 && ((randomGetNext() & 1))))) 
     {
-        aux = (s32) value1;
+        aux = value1;
         result = 1;
     }
     else 
     {
-        aux = (s32) value0;
+        aux = value0;
         result = 0;
     }
  
@@ -239,7 +237,7 @@ s32 mpFindMaxFloat(s32 numplayers, f32 value0, f32 value1, f32 value2, f32 value
     {
         if ((aux < value2) || ((value2 == aux && ((randomGetNext() & 1))))) 
         {
-            aux = (s32) value2;
+            aux = value2;
             result = 2;
         }
  
@@ -259,21 +257,20 @@ s32 mpFindMaxFloat(s32 numplayers, f32 value0, f32 value1, f32 value2, f32 value
 /**
  * Returns the index of the player with the lowest value.
  * 
- * Also suffers from the same bug as the above function.
  */
 s32 mpFindMinFloat(s32 numplayers, f32 value0, f32 value1, f32 value2, f32 value3)
 {
-    s32 aux;
+    f32 aux;
     s32 result;
  
     if ((value1 < value0) || ((value1 == value0 && ((randomGetNext() & 1))))) 
     {
-        aux = (s32) value1;
+        aux = value1;
         result = 1;
     }
     else 
     {
-        aux = (s32) value0;
+        aux = value0;
         result = 0;
     }
  
@@ -281,7 +278,7 @@ s32 mpFindMinFloat(s32 numplayers, f32 value0, f32 value1, f32 value2, f32 value
     {
         if ((value2 < aux) || ((value2 == aux && ((randomGetNext() & 1))))) 
         {
-            aux = (s32) value2;
+            aux = value2;
             result = 2;
         }
  
@@ -1003,7 +1000,8 @@ s32 mpwatchShouldDisplayRank(s32 param_1)
 #ifdef DEBUG
             osSyncPrintf("Invalid scenario %d!", get_scenario());
 #endif
-        do {} while (1);
+            /* A malformed menu state must not deadlock the game loop. */
+            return 0;
     }
 }
 
@@ -1027,7 +1025,8 @@ s32 mpwatchShouldDisplayScore(s32 param_1)
 #ifdef DEBUG
             osSyncPrintf("Invalid scenario %d!", get_scenario());
 #endif
-            do {} while (1);
+            /* A malformed menu state must not deadlock the game loop. */
+            return 0;
     }
 }
 

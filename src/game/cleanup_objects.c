@@ -23,7 +23,11 @@
 
 void cleanupObjects(s32 stage)
 {
-    u32 *obj = (u32)g_CurrentSetup.propDefs;
+    /* Keep the cursor pointer-width safe on the PC port. The N64 source used
+     * an integer-sized address temporary, but truncating a host pointer here
+     * makes stage cleanup jump into unmapped memory before reading the first
+     * definition. The stream stride is still expressed in u32 words below. */
+    u32 *obj = (u32 *)g_CurrentSetup.propDefs;
 
     if (obj)
     {
@@ -85,7 +89,7 @@ void cleanupObjects(s32 stage)
                 
             }
 
-            obj =  obj + sizepropdef(obj) ;
+            obj = obj + sizepropdef((PropDefHeaderRecord *)obj);
         }
     }
 }

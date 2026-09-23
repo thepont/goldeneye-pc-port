@@ -6,19 +6,29 @@
 #include <macro.h>
 #include "player.h"
 #include <fr.h>
+#ifdef PORT
+#include <stdint.h>
+#endif
 
 // bss
 s32 z_buffer_width; // 0x8008e8f0
 s32 z_buffer_height; // 0x8008e8f4
 
 // data
+#ifdef PORT
+/* The N64 stores this as an address-sized integer.  The PC renderer passes
+ * the allocation back through GBI image commands, so an s32 truncates normal
+ * 64-bit heap pointers before the depth buffer is used. */
+u8 *z_buffer = NULL;
+#else
 s32 z_buffer = 0; // 0x8004f010
+#endif
 
 /*
  * Address: 0x7f0d2870
 */
 void zbufDeallocate(void) {
-    z_buffer = 0;
+    z_buffer = NULL;
 }
 
 
@@ -46,15 +56,25 @@ void zbufAllocate(void)
         }
     }
 
+#ifdef PORT
+    z_buffer = (u8 *)mempAllocBytesInBank(
+        (z_buffer_width * z_buffer_height * 2) + 64, MEMPOOL_STAGE);
+    z_buffer = (u8 *)(((uintptr_t)z_buffer + 0x3FU) & ~(uintptr_t)0x3FU);
+#else
     z_buffer = mempAllocBytesInBank((z_buffer_width * z_buffer_height * 2) + 64, MEMPOOL_STAGE);
     z_buffer = ALIGN64_V1(z_buffer);
+#endif
 }
 
 
 /*
  * Address: 0x7f0d2938
 */
+#ifdef PORT
+void zbufSetBuffer(u8 *buffer, s32 width, s32 height) {
+#else
 void zbufSetBuffer(s32 buffer, s32 width, s32 height) {
+#endif
     z_buffer = buffer;
     z_buffer_width = width;
     z_buffer_height = height;
@@ -65,8 +85,13 @@ void zbufSetBuffer(s32 buffer, s32 width, s32 height) {
  * Address: 0x7f0d2954
 */
 Gfx *zbufInit(Gfx *gdl) {
+#ifdef PORT
+    u8 *test;
+#endif
     s32 phi_a3;
+#ifndef PORT
     s32 test;
+#endif
     if (z_buffer == 0) {
         zbufAllocate();
     }
@@ -75,8 +100,12 @@ Gfx *zbufInit(Gfx *gdl) {
     } else {
         phi_a3 = 0;
     }
+#ifdef PORT
+    test = z_buffer - phi_a3;
+#else
     test = (z_buffer - phi_a3);
     test = test & ~0x3F;
+#endif
     gDPPipeSync(gdl++);
     gDPSetDepthImage(gdl++, test);
     return gdl;
@@ -87,8 +116,6 @@ Gfx *zbufInit(Gfx *gdl) {
  * Address: 0x7f0d2a08
 */
 Gfx *zbufClearCurrentPlayer(Gfx *gdl) {
-    s32 start_x;
-    s32 end_x;
 #ifdef PORT
     /* D105: fast3d clears only the colour buffer at frame start
      * (gfx_pc.cpp: clear_framebuffer(true, false)) and treats the N64
@@ -103,7 +130,9 @@ Gfx *zbufClearCurrentPlayer(Gfx *gdl) {
     gdl->words.w1 = 0;
     gdl++;
     return gdl;
-#endif
+#else
+    s32 start_x;
+    s32 end_x;
     gDPPipeSync(gdl++);
     gDPSetRenderMode(gdl++, G_RM_NOOP, G_RM_NOOP2);
     gDPSetColorImage(gdl++, G_IM_FMT_RGBA, G_IM_SIZ_16b, z_buffer_width, OS_K0_TO_PHYSICAL(z_buffer));
@@ -123,4 +152,5 @@ Gfx *zbufClearCurrentPlayer(Gfx *gdl) {
     gDPFillRectangle(gdl++, start_x, 0, end_x, (z_buffer_height - 1));
     gDPPipeSync(gdl++);
     return gdl;
+#endif
 }

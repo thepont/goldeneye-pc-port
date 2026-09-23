@@ -41,6 +41,22 @@ typedef struct GeControllerDigitalState {
 int geControllerAxisPastThreshold(int value, int threshold, int positive_direction);
 int geControllerTriggerIsActive(int value, int threshold);
 int geControllerScaleAxis(int value, int deadzone, int output_max);
+int geControllerApplyLookInvertY(int value, int inverted);
+
+/* Values intentionally match the PC-only GAMEMODE values in bondconstants.h
+ * so front.c can route controller navigation without duplicating a mode map. */
+#define GE_CONTROLLER_MENU_MODE_SOLO   0
+#define GE_CONTROLLER_MENU_MODE_MULTI  1
+#define GE_CONTROLLER_MENU_MODE_CHEATS 2
+#define GE_CONTROLLER_MENU_MODE_COOP   3
+
+/* Move through the visible mode-selector rows. `direction` is -1 for up and
+ * +1 for down; unavailable rows are skipped and the list wraps. */
+int geControllerMenuModeMove(int current_mode,
+                             int direction,
+                             int multiplayer_available,
+                             int coop_available,
+                             int cheats_available);
 
 unsigned geControllerMapDigitalButtons(GeControllerDigitalState state,
                                        int menu_mode);

@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cassert>
 #include <cstdio>
+#include <algorithm>
 
 #include <map>
 #include <set>
@@ -31,8 +32,18 @@
 #include "gfx_window_manager_api.h"
 #include "gfx_rendering_api.h"
 #include "gfx_screen_config.h"
+#include "ascension_postfx.h"
 #include "dynamic_lighting.h"
+#include "world_lighting_policy.h"
+#include "fast3d_ambient_lighting.h"
+#include "fast3d_light_state.h"
+#include "fast3d_normal_policy.h"
+#include "bumpmap_runtime.h"
+#include "bump_mapping_policy.h"
 #include "fast3d_pointer_policy.h"
+#include "gfx_water_composite_policy.h"
+#include "gfx_water_heightfield_policy.h"
+#include "gfx_water_time_policy.h"
 #include "vector_text.h"
 #include "viewport_policy.h"
 
@@ -61,7 +72,7 @@ uintptr_t gfxFramebuffer;
 #define RATIO_Y (gfx_current_dimensions.height / (float)SCREEN_HEIGHT)
 
 #define MAX_BUFFERED 256
-#define MAX_LIGHTS 4
+#define MAX_LIGHTS 8
 #define MAX_VERTICES 128
 #define MAX_VERTEX_COLORS 64
 
@@ -74,6 +85,47 @@ uintptr_t gfxFramebuffer;
  * and game logic code remains untouched. */
 static bool g_dynamic_lighting_enabled = false;
 static int g_render_mode = GFX_RENDER_ORIGINAL;
+static int g_light_trace_events = 0;
+static int g_light_trace_vertex_events = 0;
+static bool g_water_material_enabled = false;
+static int g_water_trace = -1;
+static unsigned int g_water_trace_events = 0;
+static unsigned int g_water_composite_trace_events = 0;
+static unsigned int g_water_world_surface_trace_events = 0;
+static unsigned int g_water_disturbance_trace_events = 0;
+static unsigned int g_water_split_fixture_trace_events = 0;
+static std::vector<GfxWaterCompositeVertex> g_water_composite_vertices;
+struct GfxWaterActiveDisturbance {
+    GfxWaterDisturbance event;
+    float age;
+    float lifetime;
+};
+static std::vector<GfxWaterActiveDisturbance> g_water_disturbances;
+static bool g_water_disturbance_valid = false;
+static GfxWaterCompositeCamera g_water_camera = {};
+static bool g_water_camera_valid = false;
+static bool g_water_world_surface_submitted = false;
+static float g_water_elapsed_time = 0.0f;
+static float g_water_delta_time = 0.0f;
+static double g_water_previous_time = 0.0;
+static bool g_water_time_initialized = false;
+static unsigned int g_water_time_trace_events = 0;
+static GeWaterHeightfield g_water_heightfield;
+static uint32_t g_water_surface_id = 0;
+static struct XYWidthHeight g_water_viewport = {};
+/* A water composite is a bounded post-world operation. These pointers mark
+ * the exact command range belonging to the active player viewport, allowing
+ * the reflected-camera pass to reuse the authoritative display-list stream
+ * instead of introducing a second scene renderer. */
+static Gfx *g_water_scene_replay_start = nullptr;
+static Gfx *g_water_scene_replay_stop = nullptr;
+static bool g_water_scene_replay_snapshot_valid = false;
+static bool g_water_reflection_replayed = false;
+static bool g_water_reflection_replay = false;
+static bool g_water_reflection_plane_valid = false;
+static float g_water_reflection_plane_view[4] = {};
+static float g_water_reflection_visible_side = 1.0f;
+static uint32_t g_water_reflection_surface_index = 0;
 static GeDynamicLightRegistry g_world_lights;
 static constexpr GeDynamicLight kDynamicLight = {
     {0.0f, 0.0f, 0.0f},
@@ -98,6 +150,10 @@ struct NormalColor {
 struct LoadedVertex {
     float x, y, z, w;
     float u, v;
+    float view_x, view_y, view_z;
+    float source_view_x, source_view_y, source_view_z;
+    float world_x, world_y, world_z;
+    float reflection_plane_distance;
     struct RGBA color;
     uint8_t fog;
     uint8_t clip_rej;
@@ -108,6 +164,18 @@ static struct {
     std::list<TextureCacheMapIter> lru;
     std::vector<uint32_t> free_texture_ids;
 } gfx_texture_cache;
+
+/* ROM-derived normal maps are an optional sidecar. The ordinary Fast3D
+ * texture cache still owns the base texture; this separate cache owns only
+ * the auxiliary GL texture IDs so a base-texture eviction cannot accidentally
+ * recycle a normal-map object. */
+static GeBumpMapRuntime g_bump_maps;
+static GeBumpMapSourceIndex g_bump_map_sources;
+static std::unordered_map<uint64_t, uint32_t> g_bump_texture_cache;
+static std::string g_bump_maps_path;
+static bool g_bump_maps_enabled = false;
+
+extern "C" void reset_texture_state();
 
 struct ColorCombiner {
     uint64_t shader_id0;
@@ -136,6 +204,8 @@ static struct RSP {
     float current_lights_coeffs[MAX_LIGHTS][3];
     float current_lookat_coeffs[2][3]; // lookat_x, lookat_y
     uint8_t current_num_lights;        // includes ambient light
+    uint16_t light_upload_mask;
+    bool light_state_valid;
     bool lights_changed;
 
     uint32_t geometry_mode;
@@ -170,6 +240,7 @@ struct RawTexMetadata {
 
 struct LoadedTexture {
     const uint8_t* addr;
+    const uint8_t* source_addr;
     uint32_t orig_size_bytes;
     uint32_t full_size_bytes; // full_image_line_size_bytes * height
     uint32_t size_bytes; // line_size_bytes * height
@@ -242,6 +313,13 @@ static struct RenderingState {
     TextureCacheNode* textures[SHADER_MAX_TEXTURES];
 } rendering_state;
 
+/* These are copied only at the per-viewport scene marker. They contain the
+ * RSP/RDP command state needed to replay the segment deterministically; the
+ * backend GL state is saved by begin_water_reflection/end_water_reflection. */
+static decltype(rsp) g_water_scene_initial_rsp = {};
+static decltype(rdp) g_water_scene_initial_rdp = {};
+static decltype(rendering_state) g_water_scene_initial_rendering_state = {};
+
 struct GfxDimensions gfx_current_window_dimensions;
 int32_t gfx_current_window_position_x;
 int32_t gfx_current_window_position_y;
@@ -256,6 +334,9 @@ bool gfx_detail_textures_enabled = true;
 static bool game_renders_to_framebuffer;
 static int game_framebuffer;
 static int game_framebuffer_msaa_resolved;
+static std::vector<GfxPostFxViewport> g_postfx_viewports;
+static bool g_postfx_viewport_overflow;
+static constexpr std::size_t kPostFxMaxViewports = 4;
 
 /* Safe-area (TV-overscan) crop. GE's own N64 game code insets its normal
  * single-player "Full" gameplay viewport a fixed margin from the true VI
@@ -295,6 +376,172 @@ extern "C" void gfx_set_dynamic_lighting(int on) {
     g_dynamic_lighting_enabled = !!on;
 }
 
+static void gfx_set_water_material(int on) {
+    g_water_material_enabled = !!on;
+}
+
+static void gfx_reset_water_transient_state(bool context_destroy) {
+    g_water_material_enabled = false;
+    g_water_composite_vertices.clear();
+    g_water_disturbance_valid = false;
+    g_water_camera_valid = false;
+    g_water_world_surface_submitted = false;
+    g_water_surface_id = 0;
+    g_water_viewport = {};
+    g_water_scene_replay_start = nullptr;
+    g_water_scene_replay_stop = nullptr;
+    g_water_scene_replay_snapshot_valid = false;
+    g_water_reflection_replayed = false;
+    g_water_reflection_replay = false;
+    g_water_reflection_plane_valid = false;
+    std::memset(g_water_reflection_plane_view, 0,
+                sizeof(g_water_reflection_plane_view));
+    g_water_reflection_visible_side = 1.0f;
+    g_water_reflection_surface_index = 0;
+    if (context_destroy) {
+        g_water_disturbances.clear();
+        g_water_heightfield.reset();
+        g_water_elapsed_time = 0.0f;
+        g_water_delta_time = 0.0f;
+        g_water_previous_time = 0.0;
+        g_water_time_initialized = false;
+    }
+}
+
+static void gfx_render_water_composite(void);
+static bool gfx_render_water_reflection(Gfx *stop_command);
+
+extern "C" Gfx *gfx_emit_water_material(Gfx *gdl, int on) {
+    if (g_render_mode >= GFX_RENDER_ENHANCED && gdl != nullptr) {
+        gdl->words.w0 = (uint32_t)G_SETWATERMATERIAL_EXT << 24;
+        gdl->words.w1 = on ? 1U : 0U;
+        return gdl + 1;
+    }
+    return gdl;
+}
+
+extern "C" Gfx *gfx_emit_water_scene_begin(Gfx *gdl) {
+    if (g_render_mode >= GFX_RENDER_ENHANCED && gdl != nullptr) {
+        gdl->words.w0 = (uint32_t)G_BEGINWATERSCENE_EXT << 24;
+        gdl->words.w1 = 0;
+        return gdl + 1;
+    }
+    return gdl;
+}
+
+extern "C" Gfx *gfx_emit_world_water_surface(Gfx *gdl, int stage_id,
+                                                float water_height) {
+    if (g_render_mode >= GFX_RENDER_ENHANCED && gdl != nullptr) {
+        gdl->words.w0 = ((uint32_t)G_SUBMITWORLDWATER_EXT << 24) |
+                        ((uint32_t)stage_id & 0x00ffffffU);
+        uint32_t height_bits = 0;
+        std::memcpy(&height_bits, &water_height, sizeof(height_bits));
+        /* The host Gfx command union widens w1 to uint64_t; the custom
+         * opcode carries the N64-compatible low 32-bit payload. */
+        gdl->words.w1 = height_bits;
+        return gdl + 1;
+    }
+    return gdl;
+}
+
+extern "C" int gfx_water_world_surface_enabled(void) {
+    return g_render_mode >= GFX_RENDER_ENHANCED ? 1 : 0;
+}
+
+extern "C" Gfx *gfx_emit_water_composite(Gfx *gdl) {
+    if (g_render_mode >= GFX_RENDER_ENHANCED && gdl != nullptr) {
+        gdl->words.w0 = (uint32_t)G_RENDERWATERCOMPOSITE_EXT << 24;
+        gdl->words.w1 = 0;
+        return gdl + 1;
+    }
+    return gdl;
+}
+
+extern "C" void gfx_water_ripple(float water_u, float water_v,
+                                   float radius, float strength) {
+    /* Keep malformed script/effect inputs from poisoning the shader uniform
+     * or creating an unbounded wake. The game submits material-space UVs so
+     * this adapter remains independent of the active backend's world units. */
+    if (!std::isfinite(water_u) || !std::isfinite(water_v) ||
+        !std::isfinite(radius) || !std::isfinite(strength) ||
+        radius <= 0.0f || strength == 0.0f) {
+        return;
+    }
+    GfxWaterActiveDisturbance disturbance = {};
+    disturbance.event.water_u = water_u;
+    disturbance.event.water_v = water_v;
+    disturbance.event.radius = radius < 0.01f ? 0.01f :
+                               (radius > 4.0f ? 4.0f : radius);
+    disturbance.event.strength = strength < -0.05f ? -0.05f :
+                                 (strength > 0.05f ? 0.05f : strength);
+    g_water_heightfield.add_impulse({
+        disturbance.event.water_u,
+        disturbance.event.water_v,
+        disturbance.event.radius,
+        disturbance.event.strength,
+    });
+    disturbance.age = 0.0f;
+    disturbance.lifetime = 0.75f;
+    if (g_water_disturbances.size() >= GFX_WATER_MAX_DISTURBANCES) {
+        /* Deterministic overflow policy: preserve the newest wake/impact,
+         * dropping the oldest event rather than depending on allocator order. */
+        g_water_disturbances.erase(g_water_disturbances.begin());
+    }
+    g_water_disturbances.push_back(disturbance);
+    g_water_disturbance_valid = true;
+    if (getenv("GE_WATER_TRACE") != nullptr &&
+        g_water_disturbance_trace_events < 8) {
+        const char *fixture = getenv("GE_WATER_TEST_DISTURBANCE");
+        sysLogPrintf(LOG_NOTE,
+                     "WATER_DISTURBANCE: event=%s count=%zu uv=%0.3f,%0.3f radius=%0.3f strength=%0.3f",
+                     fixture != nullptr && fixture[0] != '\0' ? fixture : "runtime",
+                     g_water_disturbances.size(),
+                     (double)disturbance.event.water_u,
+                     (double)disturbance.event.water_v,
+                     (double)disturbance.event.radius,
+                     (double)disturbance.event.strength);
+        ++g_water_disturbance_trace_events;
+    }
+}
+
+extern "C" void gfx_water_boat_wake(float water_u, float water_v,
+                                      float heading_u, float heading_v,
+                                      float speed, float beam) {
+    const GeWaterBoatWakeInput input = {
+        water_u, water_v, heading_u, heading_v, speed, beam};
+    GeWaterBoatWakeBatch batch = {};
+    if (!geWaterBuildBoatWake(input, &batch)) {
+        return;
+    }
+    for (std::uint32_t i = 0; i < batch.count; ++i) {
+        const GeWaterHeightfieldImpulse &impulse = batch.impulses[i];
+        gfx_water_ripple(impulse.water_u, impulse.water_v, impulse.radius,
+                         impulse.strength);
+    }
+    if (getenv("GE_WATER_TRACE") != nullptr && batch.count != 0U) {
+        sysLogPrintf(LOG_NOTE,
+                     "WATER_BOAT_WAKE: count=%u speed=%0.3f beam=%0.3f",
+                     batch.count, (double)speed, (double)beam);
+    }
+}
+
+extern "C" void gfx_water_boat_wake_world(float world_x, float world_z,
+                                             float heading_radians,
+                                             float speed, float beam) {
+    float water_u = 0.0f;
+    float water_v = 0.0f;
+    if (!geWaterSurfaceUvFromWorld(world_x, world_z, &water_u, &water_v) ||
+        !std::isfinite(heading_radians)) {
+        return;
+    }
+    /* The heightfield's U axis follows world Z and its V axis follows world X.
+     * Keep this conversion in the renderer adapter so gameplay only supplies
+     * the vehicle transform and never owns material-space conventions. */
+    gfx_water_boat_wake(water_u, water_v,
+                        std::cos(heading_radians),
+                        std::sin(heading_radians), speed, beam);
+}
+
 extern "C" void gfx_set_render_mode(int mode) {
     if (mode < GFX_RENDER_ORIGINAL) {
         mode = GFX_RENDER_ORIGINAL;
@@ -309,7 +556,7 @@ extern "C" int gfx_get_render_mode(void) {
 }
 
 static bool gfx_world_lighting_enabled(void) {
-    return g_dynamic_lighting_enabled || g_render_mode >= GFX_RENDER_ENHANCED;
+    return geWorldLightingEnabled(g_dynamic_lighting_enabled ? 1 : 0) != 0;
 }
 
 extern "C" void gfx_world_lighting_begin_frame(void) {
@@ -384,6 +631,148 @@ static void gfx_flush(void) {
         buf_vbo_len = 0;
         buf_vbo_num_tris = 0;
     }
+}
+
+static void gfx_select_bump_map(uint32_t texture_id, bool enabled)
+{
+    if (gfx_rapi != nullptr && gfx_rapi->set_bump_texture != nullptr) {
+        gfx_rapi->set_bump_texture(texture_id, enabled && texture_id != 0);
+    }
+}
+
+static void gfx_clear_bump_texture_cache(void)
+{
+    gfx_select_bump_map(0, false);
+    if (gfx_rapi != nullptr && gfx_rapi->delete_texture != nullptr) {
+        for (const auto &entry : g_bump_texture_cache) {
+            gfx_rapi->delete_texture(entry.second);
+        }
+    }
+    g_bump_texture_cache.clear();
+}
+
+static uint32_t gfx_load_bump_texture(const uint8_t *source_address)
+{
+    if (!g_bump_maps_enabled || !g_bump_maps.loaded() ||
+        gfx_rapi == nullptr || gfx_rapi->set_bump_texture == nullptr) {
+        return 0;
+    }
+
+    uint64_t rom_offset = 0;
+    if (!geBumpMapRomOffset(source_address, &rom_offset) &&
+        !g_bump_map_sources.find(source_address, &rom_offset)) {
+        return 0;
+    }
+
+    const auto cached = g_bump_texture_cache.find(rom_offset);
+    if (cached != g_bump_texture_cache.end()) {
+        return cached->second;
+    }
+
+    /* The renderer uses the base (lod 0) normal map. Higher LODs remain in
+     * the manifest for offline inspection and future mip-specific tuning. */
+    const GeBumpMapPixels *pixels = g_bump_maps.load_normal_map(rom_offset, 0);
+    if (pixels == nullptr || pixels->rgba.empty()) {
+        return 0;
+    }
+
+    const uint32_t texture_id = gfx_rapi->new_texture();
+    gfx_rapi->select_texture(2, texture_id, true);
+    if (gfx_rapi->upload_bump_texture != nullptr) {
+        gfx_rapi->upload_bump_texture(pixels->rgba.data(), pixels->width,
+                                      pixels->height, true);
+    } else {
+        gfx_rapi->upload_texture(pixels->rgba.data(), pixels->width,
+                                 pixels->height, true);
+    }
+    gfx_rapi->set_sampler_parameters(
+        2, true, G_TX_NOMIRROR | G_TX_WRAP,
+        G_TX_NOMIRROR | G_TX_WRAP, true);
+    g_bump_texture_cache.emplace(rom_offset, texture_id);
+    sysLogPrintf(LOG_INFO, "BUMP_MAPS: loaded normal map rom=0x%llx %ux%u",
+                 (unsigned long long)rom_offset, pixels->width,
+                 pixels->height);
+    return texture_id;
+}
+
+extern "C" void gfx_register_texture_source(
+    const uint8_t *source_address, const uint8_t *rom_address)
+{
+    uint64_t rom_offset = 0;
+    if (source_address == nullptr ||
+        !geBumpMapRomOffset(rom_address, &rom_offset)) {
+        return;
+    }
+    g_bump_map_sources.register_source(source_address, rom_offset);
+}
+
+static void gfx_attach_bump_map(int texture_unit, const uint8_t *source_address)
+{
+    if (texture_unit != 0) {
+        return;
+    }
+
+    TextureCacheNode *node = rendering_state.textures[texture_unit];
+    if (node == nullptr) {
+        gfx_select_bump_map(0, false);
+        return;
+    }
+
+    node->second.bump_source_addr = source_address;
+    node->second.bump_texture_id = gfx_load_bump_texture(source_address);
+    node->second.bump_map_available = node->second.bump_texture_id != 0;
+    gfx_select_bump_map(node->second.bump_texture_id,
+                        g_bump_maps_enabled && node->second.bump_map_available);
+}
+
+extern "C" void gfx_set_bump_maps_path(const char *path)
+{
+    const std::string next_path = path == nullptr ? "" : path;
+    if (next_path == g_bump_maps_path) {
+        return;
+    }
+
+    /* Existing base-cache nodes carry the old sidecar association. Clearing
+     * the normal texture cache together with them makes a live config reload
+     * deterministic and prevents a map from the previous ROM directory from
+     * surviving under a reused base texture. */
+    if (gfx_rapi != nullptr) {
+        gfx_texture_cache_clear();
+    } else {
+        g_bump_texture_cache.clear();
+    }
+    g_bump_maps_path = next_path;
+    const bool loaded = !g_bump_maps_path.empty() &&
+                        g_bump_maps.load_manifest(g_bump_maps_path.c_str());
+    sysLogPrintf(loaded ? LOG_INFO : LOG_WARNING,
+                 "BUMP_MAPS: %s (%zu manifest entries)",
+                 loaded ? g_bump_maps_path.c_str() :
+                          "sidecar manifest unavailable",
+                 g_bump_maps.entry_count());
+}
+
+extern "C" void gfx_set_bump_maps_enabled(int on)
+{
+    const bool next_enabled = on != 0;
+    if (next_enabled == g_bump_maps_enabled) {
+        return;
+    }
+
+    /* The feature changes the generated vertex layout. Invalidate both the
+     * base-texture cache and shader pool as one transaction; otherwise an
+     * already-cached program made with the old layout can be paired with the
+     * new VBO stream after a live options change. */
+    g_bump_maps_enabled = next_enabled;
+    if (gfx_rapi != nullptr) {
+        reset_texture_state();
+    } else {
+        gfx_select_bump_map(0, false);
+    }
+}
+
+extern "C" int gfx_get_bump_maps_enabled(void)
+{
+    return g_bump_maps_enabled ? 1 : 0;
 }
 
 static struct ShaderProgram* gfx_lookup_or_create_shader_program(uint64_t shader_id0, uint32_t shader_id1) {
@@ -643,6 +1032,7 @@ void gfx_texture_cache_clear() {
     }
     gfx_texture_cache.map.clear();
     gfx_texture_cache.lru.clear();
+    gfx_clear_bump_texture_cache();
     rdp.textures_changed[0] = rdp.textures_changed[1] = true;
     memset(rendering_state.textures, 0, sizeof(rendering_state.textures));
 }
@@ -654,6 +1044,11 @@ static bool gfx_texture_cache_lookup(int i, const TextureCacheKey& key) {
     if (it != gfx_texture_cache.map.end()) {
         gfx_rapi->select_texture(i, it->second.texture_id, it->second.linear_filter);
         *n = &*it;
+        if (i == 0) {
+            gfx_select_bump_map(it->second.bump_texture_id,
+                                g_bump_maps_enabled &&
+                                    it->second.bump_map_available);
+        }
         gfx_texture_cache.lru.splice(gfx_texture_cache.lru.end(), gfx_texture_cache.lru,
                                      it->second.lru_location); // move to back
         return true;
@@ -683,6 +1078,9 @@ static bool gfx_texture_cache_lookup(int i, const TextureCacheKey& key) {
     gfx_rapi->select_texture(i, texture_id, false);
     gfx_rapi->set_sampler_parameters(i, false, 0, 0, rdp.tex_lod);
     *n = node;
+    if (i == 0) {
+        gfx_select_bump_map(0, false);
+    }
     return false;
 }
 
@@ -1385,35 +1783,60 @@ static void import_texture(int i, int tile, bool importReplacement) {
         sysFatalError("Bad texture format in tile %d: %02x %02x", tile, fmt, siz);
     }
 
+    /* Attach the base texture's ROM-derived tangent-space normal map after
+     * the ordinary texture upload. This is deliberately limited to texel0:
+     * the sidecar describes the material's primary image, while texel1 is
+     * often a detail, mask, or environment texture with different UVs. */
+    gfx_attach_bump_map(i, loaded_texture.source_addr != nullptr
+                               ? loaded_texture.source_addr
+                               : orig_addr);
+
     loaded_texture.addr = saved_addr;
     loaded_texture.full_image_line_size_bytes = saved_full_line;
 }
 
-static void gfx_normalize_vector(float v[3]) {
-    float s = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    v[0] /= s;
-    v[1] /= s;
-    v[2] /= s;
-}
-
-static void gfx_transposed_matrix_mul(float res[3], const float a[3], const float b[4][4]) {
-    res[0] = a[0] * b[0][0] + a[1] * b[0][1] + a[2] * b[0][2];
-    res[1] = a[0] * b[1][0] + a[1] * b[1][1] + a[2] * b[1][2];
-    res[2] = a[0] * b[2][0] + a[1] * b[2][1] + a[2] * b[2][2];
+static void gfx_normal_matrix_mul(float res[3], const float a[3],
+                                  const float b[4][4]) {
+    const GeFast3dNormalVec3 input = {a[0], a[1], a[2]};
+    GeFast3dNormalVec3 output = {};
+    geFast3dTransformNormal(&output, input, b);
+    res[0] = output.x;
+    res[1] = output.y;
+    res[2] = output.z;
 }
 
 static void calculate_normal_dir(const Light_t* light, float coeffs[3]) {
+    if (light == nullptr || coeffs == nullptr ||
+        rsp.modelview_matrix_stack_size == 0) {
+        if (coeffs != nullptr) {
+            coeffs[0] = 0.0f;
+            coeffs[1] = 0.0f;
+            coeffs[2] = 1.0f;
+        }
+        return;
+    }
     const float light_dir[3] = { light->dir[0] / 127.f, light->dir[1] / 127.f, light->dir[2] / 127.f };
 
-    gfx_transposed_matrix_mul(coeffs, light_dir, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
-    gfx_normalize_vector(coeffs);
+    gfx_normal_matrix_mul(coeffs, light_dir,
+                          rsp.modelview_matrix_stack[
+                              rsp.modelview_matrix_stack_size - 1]);
 }
 
 static void calculate_normal_dir(const struct NormalColor *vcn, float coeffs[3]) {
+    if (vcn == nullptr || coeffs == nullptr ||
+        rsp.modelview_matrix_stack_size == 0) {
+        if (coeffs != nullptr) {
+            coeffs[0] = 0.0f;
+            coeffs[1] = 0.0f;
+            coeffs[2] = 1.0f;
+        }
+        return;
+    }
     const float light_dir[3] = { vcn->x / 127.f, vcn->y / 127.f, vcn->z / 127.f };
 
-    gfx_transposed_matrix_mul(coeffs, light_dir, rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1]);
-    gfx_normalize_vector(coeffs);
+    gfx_normal_matrix_mul(coeffs, light_dir,
+                          rsp.modelview_matrix_stack[
+                              rsp.modelview_matrix_stack_size - 1]);
 }
 
 static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4][4]) {
@@ -1424,6 +1847,270 @@ static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4
         }
     }
     memcpy(res, tmp, sizeof(tmp));
+}
+
+/* The water pass runs after the display list has moved on to HUD/projection
+ * state, so it cannot read rsp.P_matrix at composite time. Capture its inverse
+ * when the first water triangle is accepted. Gauss-Jordan keeps this utility
+ * independent of a graphics API and makes singular/malformed matrices a
+ * normal fallback instead of allowing NaNs into the shader. */
+static bool gfx_matrix_inverse_for_water(const float input[4][4], float output[16]) {
+    float augmented[4][8] = {};
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            if (!std::isfinite(input[row][column])) {
+                return false;
+            }
+            augmented[row][column] = input[row][column];
+        }
+        augmented[row][row + 4] = 1.0f;
+    }
+
+    for (int column = 0; column < 4; ++column) {
+        int pivot = column;
+        for (int row = column + 1; row < 4; ++row) {
+            if (std::fabs(augmented[row][column]) >
+                std::fabs(augmented[pivot][column])) {
+                pivot = row;
+            }
+        }
+        if (std::fabs(augmented[pivot][column]) < 0.0000001f) {
+            return false;
+        }
+        if (pivot != column) {
+            for (int entry = 0; entry < 8; ++entry) {
+                std::swap(augmented[pivot][entry], augmented[column][entry]);
+            }
+        }
+
+        const float divisor = augmented[column][column];
+        if (!std::isfinite(divisor) || std::fabs(divisor) < 0.0000001f) {
+            return false;
+        }
+        for (int entry = 0; entry < 8; ++entry) {
+            augmented[column][entry] /= divisor;
+            if (!std::isfinite(augmented[column][entry])) {
+                return false;
+            }
+        }
+        for (int row = 0; row < 4; ++row) {
+            if (row == column) {
+                continue;
+            }
+            const float factor = augmented[row][column];
+            for (int entry = 0; entry < 8; ++entry) {
+                augmented[row][entry] -= factor * augmented[column][entry];
+                if (!std::isfinite(augmented[row][entry])) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    /* RSP matrices are applied to row vectors; GLSL applies column vectors.
+     * Upload the transpose of the row-vector inverse in column-major order. */
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            output[column * 4 + row] = augmented[column][row + 4];
+            if (!std::isfinite(output[column * 4 + row])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool gfx_water_matrix_is_finite(const float input[4][4]) {
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            if (!std::isfinite(input[row][column])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static void gfx_water_matrix_to_gl(const float input[4][4], float output[16]) {
+    /* RSP stores row-vector matrices; OpenGL's matrix upload consumes the
+     * transpose in column-major memory. Keep this conversion in one place so
+     * world-space displacement and depth reconstruction cannot diverge. */
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            output[column * 4 + row] = input[column][row];
+        }
+    }
+}
+
+static bool gfx_water_normal_matrix_for_water(const float input[4][4], float output[9]) {
+    if (!gfx_water_matrix_is_finite(input)) {
+        return false;
+    }
+
+    const float a00 = input[0][0], a01 = input[0][1], a02 = input[0][2];
+    const float a10 = input[1][0], a11 = input[1][1], a12 = input[1][2];
+    const float a20 = input[2][0], a21 = input[2][1], a22 = input[2][2];
+    const float determinant = a00 * (a11 * a22 - a12 * a21)
+                            - a01 * (a10 * a22 - a12 * a20)
+                            + a02 * (a10 * a21 - a11 * a20);
+    if (!std::isfinite(determinant) || std::fabs(determinant) < 0.0000001f) {
+        return false;
+    }
+
+    const float inverse[3][3] = {
+        {(a11 * a22 - a12 * a21) / determinant,
+         (a02 * a21 - a01 * a22) / determinant,
+         (a01 * a12 - a02 * a11) / determinant},
+        {(a12 * a20 - a10 * a22) / determinant,
+         (a00 * a22 - a02 * a20) / determinant,
+         (a02 * a10 - a00 * a12) / determinant},
+        {(a10 * a21 - a11 * a20) / determinant,
+         (a01 * a20 - a00 * a21) / determinant,
+         (a00 * a11 - a01 * a10) / determinant},
+    };
+    for (int column = 0; column < 3; ++column) {
+        for (int row = 0; row < 3; ++row) {
+            /* inverse-transpose, uploaded column-major */
+            output[column * 3 + row] = inverse[column][row];
+            if (!std::isfinite(output[column * 3 + row])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool gfx_water_clip_planes_from_projection(const float projection[4][4],
+                                                  float *near_plane,
+                                                  float *far_plane) {
+    if (near_plane == nullptr || far_plane == nullptr ||
+        !gfx_water_matrix_is_finite(projection)) {
+        return false;
+    }
+
+    /* Accept both matrix layouts used by the RSP/backend boundary. The first
+     * candidate is the native row-vector projection; the second covers a
+     * column-vector projection supplied by a test/backend adapter. */
+    const float candidates[2][2] = {
+        {projection[2][2], projection[3][2]},
+        {projection[2][2], projection[2][3]},
+    };
+    for (const auto &candidate : candidates) {
+        const float a = candidate[0];
+        const float b = candidate[1];
+        const float near_value = b / (a - 1.0f);
+        const float far_value = b / (a + 1.0f);
+        if (std::isfinite(near_value) && std::isfinite(far_value) &&
+            near_value > 0.0001f && far_value > near_value + 0.0001f) {
+            *near_plane = near_value;
+            *far_plane = far_value;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool gfx_capture_water_camera(void) {
+    if (gfx_rapi == nullptr || gfx_rapi->get_clip_parameters == nullptr ||
+        (!g_water_scene_replay_snapshot_valid && rsp.modelview_matrix_stack_size == 0)) {
+        return false;
+    }
+
+    /* The sky water fan is authored as a projected screen-space quad. Its
+     * temporary ortho-like projection is useful for the legacy draw, but it
+     * is not a physical camera and has no recoverable near/far range. The
+     * scene-begin marker captured the real world camera before that fan was
+     * emitted; use that snapshot for reflection, refraction, and depth while
+     * retaining the fan's own clip vertices for raster coverage. */
+    const auto &camera_rsp = g_water_scene_replay_snapshot_valid
+                                 ? g_water_scene_initial_rsp
+                                 : rsp;
+    if (camera_rsp.modelview_matrix_stack_size == 0 ||
+        !gfx_water_matrix_is_finite(camera_rsp.P_matrix) ||
+        !gfx_water_matrix_is_finite(camera_rsp.MP_matrix)) {
+        return false;
+    }
+
+    GfxWaterCompositeCamera camera = {};
+    if (!gfx_matrix_inverse_for_water(camera_rsp.P_matrix,
+                                      camera.inverse_projection) ||
+        !gfx_water_normal_matrix_for_water(
+            camera_rsp.modelview_matrix_stack[
+                camera_rsp.modelview_matrix_stack_size - 1],
+            camera.normal_matrix) ||
+        !gfx_water_clip_planes_from_projection(camera_rsp.P_matrix,
+                                               &camera.near_plane,
+                                               &camera.far_plane)) {
+        return false;
+    }
+    gfx_water_matrix_to_gl(camera_rsp.MP_matrix, camera.world_to_clip);
+    gfx_water_matrix_to_gl(
+        camera_rsp.modelview_matrix_stack[
+            camera_rsp.modelview_matrix_stack_size - 1],
+        camera.world_to_view);
+    gfx_water_matrix_to_gl(camera_rsp.P_matrix, camera.forward_projection);
+
+    const GfxClipParameters clip_parameters = gfx_rapi->get_clip_parameters();
+    camera.depth_convention = clip_parameters.z_is_from_0_to_1 ? 1 : 0;
+    camera.invert_y = clip_parameters.invert_y ? 1 : 0;
+    g_water_viewport = rdp.viewport;
+    camera.viewport_x = g_water_viewport.x;
+    camera.viewport_y = g_water_viewport.y;
+    camera.viewport_width = g_water_viewport.width;
+    camera.viewport_height = g_water_viewport.height;
+    camera.reflection_surface_mask = 0;
+    camera.reflection_atlas_columns = GE_WATER_REFLECTION_ATLAS_COLUMNS;
+    camera.reflection_atlas_rows = GE_WATER_REFLECTION_ATLAS_ROWS;
+    if (camera.viewport_width == 0 || camera.viewport_height == 0) {
+        return false;
+    }
+
+    g_water_camera = camera;
+    return true;
+}
+
+static uint32_t gfx_water_register_surface(const float plane[4],
+                                           const float view_plane[4],
+                                           uint32_t surface_id) {
+    if (!g_water_camera_valid || plane == nullptr || view_plane == nullptr) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    for (uint32_t index = 0; index < g_water_camera.surface_count; ++index) {
+        bool same_plane = true;
+        for (int component = 0; component < 4; ++component) {
+            if (std::fabs(g_water_camera.surfaces[index].plane[component] -
+                          plane[component]) > 0.0001f) {
+                same_plane = false;
+                break;
+            }
+        }
+        if (same_plane) {
+            return index;
+        }
+    }
+    if (g_water_camera.surface_count >= GFX_WATER_MAX_SURFACES) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    const uint32_t reflection_index = g_water_camera.surface_count;
+    GfxWaterSurface &surface =
+        g_water_camera.surfaces[g_water_camera.surface_count++];
+    surface.surface_id = surface_id;
+    std::memcpy(surface.plane, plane, sizeof(surface.plane));
+    std::memcpy(surface.view_plane, view_plane, sizeof(surface.view_plane));
+    (void)surface_id;
+    if (!g_water_reflection_plane_valid) {
+        std::memcpy(g_water_reflection_plane_view, view_plane,
+                    sizeof(g_water_reflection_plane_view));
+        const float camera_distance = view_plane[3];
+        if (std::isfinite(camera_distance) &&
+            std::fabs(camera_distance) > 0.000001f) {
+            g_water_reflection_visible_side = camera_distance >= 0.0f
+                                                   ? 1.0f
+                                                   : -1.0f;
+            g_water_reflection_plane_valid = true;
+        }
+    }
+    return reflection_index;
 }
 
 static void gfx_sp_matrix(uint8_t parameters, const int32_t* addr) {
@@ -1519,6 +2206,67 @@ static inline bool fast3d_ptr_ok(const void *p) {
     return geFast3dPointerLooksMapped((uintptr_t)p);
 }
 
+static bool gfx_water_reflect_view_point(const float source[3],
+                                         float reflected[3]) {
+    if (!g_water_reflection_plane_valid || source == nullptr ||
+        reflected == nullptr) {
+        return false;
+    }
+    const GeWaterVec3 point = {source[0], source[1], source[2]};
+    if (!geWaterCompositeVectorIsFinite(point)) {
+        return false;
+    }
+    const float signed_distance = geWaterCompositePlaneSignedDistance(
+        point, g_water_reflection_plane_view);
+    if (!std::isfinite(signed_distance)) {
+        return false;
+    }
+    const GeWaterVec3 result = geWaterCompositeReflectPointAcrossPlane(
+        point, g_water_reflection_plane_view);
+    if (!geWaterCompositeVectorIsFinite(result)) {
+        return false;
+    }
+    reflected[0] = result.x;
+    reflected[1] = result.y;
+    reflected[2] = result.z;
+    return true;
+}
+
+static void gfx_water_project_reflected_vertex(LoadedVertex *vertex) {
+    if (vertex == nullptr) {
+        return;
+    }
+    const float source[3] = {
+        vertex->source_view_x, vertex->source_view_y, vertex->source_view_z,
+    };
+    float reflected[3];
+    if (!gfx_water_reflect_view_point(source, reflected)) {
+        return;
+    }
+    vertex->view_x = reflected[0];
+    vertex->view_y = reflected[1];
+    vertex->view_z = reflected[2];
+    vertex->x = reflected[0] * rsp.P_matrix[0][0] +
+                reflected[1] * rsp.P_matrix[1][0] +
+                reflected[2] * rsp.P_matrix[2][0] + rsp.P_matrix[3][0];
+    vertex->y = reflected[0] * rsp.P_matrix[0][1] +
+                reflected[1] * rsp.P_matrix[1][1] +
+                reflected[2] * rsp.P_matrix[2][1] + rsp.P_matrix[3][1];
+    vertex->z = reflected[0] * rsp.P_matrix[0][2] +
+                reflected[1] * rsp.P_matrix[1][2] +
+                reflected[2] * rsp.P_matrix[2][2] + rsp.P_matrix[3][2];
+    vertex->w = reflected[0] * rsp.P_matrix[0][3] +
+                reflected[1] * rsp.P_matrix[1][3] +
+                reflected[2] * rsp.P_matrix[2][3] + rsp.P_matrix[3][3];
+    vertex->x = gfx_adjust_x_for_aspect_ratio(vertex->x, vertex->w);
+    vertex->clip_rej = 0;
+    if (vertex->x < -vertex->w) vertex->clip_rej |= 1;
+    if (vertex->x > vertex->w) vertex->clip_rej |= 2;
+    if (vertex->y < -vertex->w) vertex->clip_rej |= 4;
+    if (vertex->y > vertex->w) vertex->clip_rej |= 8;
+    if (vertex->z > vertex->w) vertex->clip_rej |= 32;
+}
+
 static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* vertices) {
     SUPPORT_CHECK(n_vertices <= MAX_VERTICES);
 
@@ -1539,7 +2287,49 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
         float z = v->v.ob[0] * rsp.MP_matrix[0][2] + v->v.ob[1] * rsp.MP_matrix[1][2] + v->v.ob[2] * rsp.MP_matrix[2][2] + rsp.MP_matrix[3][2];
         float w = v->v.ob[0] * rsp.MP_matrix[0][3] + v->v.ob[1] * rsp.MP_matrix[1][3] + v->v.ob[2] * rsp.MP_matrix[2][3] + rsp.MP_matrix[3][3];
 
-        x = gfx_adjust_x_for_aspect_ratio(x, w);
+        /* Keep the coordinate spaces needed by post-world materials. The
+         * legacy RSP path previously threw this information away after
+         * producing clip coordinates, which forced water to invent a view ray
+         * from the camera-facing screen quad. `world_*` deliberately retains
+         * the authored object/world stream while `view_*` is the active
+         * model-view transform used for lighting and reconstruction. */
+        d->world_x = (float)v->v.ob[0];
+        d->world_y = (float)v->v.ob[1];
+        d->world_z = (float)v->v.ob[2];
+        if (rsp.modelview_matrix_stack_size > 0) {
+            const float (*modelview)[4] =
+                rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1];
+            d->view_x = v->v.ob[0] * modelview[0][0] +
+                        v->v.ob[1] * modelview[1][0] +
+                        v->v.ob[2] * modelview[2][0] + modelview[3][0];
+            d->view_y = v->v.ob[0] * modelview[0][1] +
+                        v->v.ob[1] * modelview[1][1] +
+                        v->v.ob[2] * modelview[2][1] + modelview[3][1];
+            d->view_z = v->v.ob[0] * modelview[0][2] +
+                        v->v.ob[1] * modelview[1][2] +
+                        v->v.ob[2] * modelview[2][2] + modelview[3][2];
+        } else {
+            d->view_x = d->world_x;
+            d->view_y = d->world_y;
+            d->view_z = d->world_z;
+        }
+        d->source_view_x = d->view_x;
+        d->source_view_y = d->view_y;
+        d->source_view_z = d->view_z;
+        d->reflection_plane_distance =
+            g_water_reflection_plane_view[0] * d->source_view_x +
+            g_water_reflection_plane_view[1] * d->source_view_y +
+            g_water_reflection_plane_view[2] * d->source_view_z +
+            g_water_reflection_plane_view[3];
+        if (g_water_reflection_replay && g_water_reflection_plane_valid) {
+            gfx_water_project_reflected_vertex(d);
+            x = d->x;
+            y = d->y;
+            z = d->z;
+            w = d->w;
+        } else {
+            x = gfx_adjust_x_for_aspect_ratio(x, w);
+        }
 
         short U = v->v.tc[0] * rsp.texture_scaling_factor.s >> 16;
         short V = v->v.tc[1] * rsp.texture_scaling_factor.t >> 16;
@@ -1559,8 +2349,26 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
         }
         const struct NormalColor *vcn = &vcn_data;
 
+        const uint8_t *ambient_color = nullptr;
+        if (rsp.current_num_lights > 0)
+        {
+            ambient_color =
+                rsp.current_lights[rsp.current_num_lights - 1].col;
+        }
+        const uint8_t authored_vertex_color[3] = {
+            vcn->r, vcn->g, vcn->b,
+        };
+        uint8_t base_vertex_color[3] = {};
+        const bool n64_lighting_ready =
+            (rsp.geometry_mode & G_LIGHTING) != 0 && rsp.light_state_valid;
+        geFast3dSelectVertexBaseColor(
+            n64_lighting_ready ? rsp.geometry_mode
+                                : (rsp.geometry_mode & ~G_LIGHTING),
+            ambient_color, authored_vertex_color,
+            base_vertex_color);
+
         if (rsp.geometry_mode & G_LIGHTING) {
-            if (rsp.lights_changed) {
+            if (rsp.lights_changed && rsp.light_state_valid) {
                 for (int i = 0; i < rsp.current_num_lights - 1; i++) {
                     calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
                 }
@@ -1571,24 +2379,27 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
                 rsp.lights_changed = false;
             }
 
-            int r = rsp.current_lights[rsp.current_num_lights - 1].col[0];
-            int g = rsp.current_lights[rsp.current_num_lights - 1].col[1];
-            int b = rsp.current_lights[rsp.current_num_lights - 1].col[2];
+            int r = base_vertex_color[0];
+            int g = base_vertex_color[1];
+            int b = base_vertex_color[2];
 
-            for (int i = 0; i < rsp.current_num_lights - 1; i++) {
-                float intensity = 0;
-                intensity += vcn->x * rsp.current_lights_coeffs[i][0];
-                intensity += vcn->y * rsp.current_lights_coeffs[i][1];
-                intensity += vcn->z * rsp.current_lights_coeffs[i][2];
-                intensity /= 127.0f;
-                if (intensity > 0.0f) {
-                    r += intensity * rsp.current_lights[i].col[0];
-                    g += intensity * rsp.current_lights[i].col[1];
-                    b += intensity * rsp.current_lights[i].col[2];
+            if (rsp.light_state_valid) {
+                for (int i = 0; i < rsp.current_num_lights - 1; i++) {
+                    float intensity = 0;
+                    intensity += vcn->x * rsp.current_lights_coeffs[i][0];
+                    intensity += vcn->y * rsp.current_lights_coeffs[i][1];
+                    intensity += vcn->z * rsp.current_lights_coeffs[i][2];
+                    intensity /= 127.0f;
+                    if (intensity > 0.0f) {
+                        r += intensity * rsp.current_lights[i].col[0];
+                        g += intensity * rsp.current_lights[i].col[1];
+                        b += intensity * rsp.current_lights[i].col[2];
+                    }
                 }
             }
 
-            if (gfx_world_lighting_enabled()) {
+            if (gfx_world_lighting_enabled() &&
+                rsp.modelview_matrix_stack_size > 0) {
                 const float (*modelview)[4] =
                     rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1];
                 const float view_position[3] = {
@@ -1606,7 +2417,7 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
                     (float)vcn->x, (float)vcn->y, (float)vcn->z,
                 };
                 float view_normal[3];
-                gfx_transposed_matrix_mul(view_normal, object_normal, modelview);
+                gfx_normal_matrix_mul(view_normal, object_normal, modelview);
                 for (std::size_t light_index = 0;
                      light_index < g_world_lights.size(); ++light_index) {
                     float contribution[3];
@@ -1622,6 +2433,19 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
             d->color.r = r > 255 ? 255 : r;
             d->color.g = g > 255 ? 255 : g;
             d->color.b = b > 255 ? 255 : b;
+            if (getenv("GE_LIGHT_TRACE") != nullptr &&
+                g_light_trace_vertex_events < 24) {
+                sysLogPrintf(LOG_NOTE,
+                             "FAST3D_LIGHT_TRACE: vertex normal=%d,%d,%d ambient=%d,%d,%d valid=%d shade=%u,%u,%u",
+                             (int)vcn->x, (int)vcn->y, (int)vcn->z,
+                             ambient_color != nullptr ? (int)ambient_color[0] : -1,
+                             ambient_color != nullptr ? (int)ambient_color[1] : -1,
+                             ambient_color != nullptr ? (int)ambient_color[2] : -1,
+                             rsp.light_state_valid ? 1 : 0,
+                             (unsigned)d->color.r, (unsigned)d->color.g,
+                             (unsigned)d->color.b);
+                ++g_light_trace_vertex_events;
+            }
 
             /* D195/D72 correction: GE DOES use RSP-generated (environment-
              * mapped) texture coordinates -- shiny gold/silver weapon skins
@@ -1673,9 +2497,9 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
                 V = (int32_t)(doty * rsp.texture_scaling_factor.t);
             }
         } else {
-            d->color.r = vcn->r;
-            d->color.g = vcn->g;
-            d->color.b = vcn->b;
+            d->color.r = base_vertex_color[0];
+            d->color.g = base_vertex_color[1];
+            d->color.b = base_vertex_color[2];
         }
 
 #ifdef PORT
@@ -1843,10 +2667,804 @@ static inline int gfx_lod_tile_offset(const int i) {
     return rdp.tex_lod ? 0 : i;
 }
 
-static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bool is_rect) {
-    struct LoadedVertex* v1 = &rsp.loaded_vertices[vtx1_idx];
-    struct LoadedVertex* v2 = &rsp.loaded_vertices[vtx2_idx];
-    struct LoadedVertex* v3 = &rsp.loaded_vertices[vtx3_idx];
+static bool gfx_water_plane_from_points(const float p[3][3], float plane[4]) {
+    if (p == nullptr || plane == nullptr) {
+        return false;
+    }
+    for (int point = 0; point < 3; ++point) {
+        for (int component = 0; component < 3; ++component) {
+            if (!std::isfinite(p[point][component])) {
+                return false;
+            }
+        }
+    }
+
+    const float e1[3] = {
+        p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2],
+    };
+    const float e2[3] = {
+        p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2],
+    };
+    float normal[3] = {
+        e1[1] * e2[2] - e1[2] * e2[1],
+        e1[2] * e2[0] - e1[0] * e2[2],
+        e1[0] * e2[1] - e1[1] * e2[0],
+    };
+    const float normal_length = std::sqrt(normal[0] * normal[0] +
+                                          normal[1] * normal[1] +
+                                          normal[2] * normal[2]);
+    if (!std::isfinite(normal_length) || normal_length < 0.000001f) {
+        return false;
+    }
+    for (float &component : normal) {
+        component /= normal_length;
+    }
+    for (int component = 0; component < 3; ++component) {
+        plane[component] = normal[component];
+    }
+    plane[3] = -(normal[0] * p[0][0] + normal[1] * p[0][1] +
+                 normal[2] * p[0][2]);
+    return std::isfinite(plane[3]);
+}
+
+static bool gfx_water_build_surface_frame(const LoadedVertex *v1,
+                                          const LoadedVertex *v2,
+                                          const LoadedVertex *v3,
+                                          float plane[4],
+                                          float view_plane[4],
+                                          float tangent[3],
+                                          float bitangent[3]) {
+    const float p[3][3] = {
+        {v1->world_x, v1->world_y, v1->world_z},
+        {v2->world_x, v2->world_y, v2->world_z},
+        {v3->world_x, v3->world_y, v3->world_z},
+    };
+    if (!gfx_water_plane_from_points(p, plane)) {
+        return false;
+    }
+
+    const float view_positions[3][3] = {
+        {v1->view_x, v1->view_y, v1->view_z},
+        {v2->view_x, v2->view_y, v2->view_z},
+        {v3->view_x, v3->view_y, v3->view_z},
+    };
+    if (!gfx_water_plane_from_points(view_positions, view_plane)) {
+        return false;
+    }
+
+    const float e1[3] = {p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]};
+    const float e2[3] = {p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+    const float normal[3] = {plane[0], plane[1], plane[2]};
+    const float du1 = (v2->u - v1->u) / 32.0f;
+    const float dv1 = (v2->v - v1->v) / 32.0f;
+    const float du2 = (v3->u - v1->u) / 32.0f;
+    const float dv2 = (v3->v - v1->v) / 32.0f;
+    const float uv_determinant = du1 * dv2 - du2 * dv1;
+    if (std::fabs(uv_determinant) >= 0.000001f) {
+        for (int component = 0; component < 3; ++component) {
+            tangent[component] = (e1[component] * dv2 - e2[component] * dv1) /
+                                 uv_determinant;
+            bitangent[component] = (e2[component] * du1 - e1[component] * du2) /
+                                   uv_determinant;
+        }
+    } else {
+        std::memcpy(tangent, e1, sizeof(e1));
+        const float tangent_projection = tangent[0] * normal[0] +
+                                         tangent[1] * normal[1] +
+                                         tangent[2] * normal[2];
+        for (int component = 0; component < 3; ++component) {
+            tangent[component] -= normal[component] * tangent_projection;
+        }
+        const float tangent_length = std::sqrt(tangent[0] * tangent[0] +
+                                               tangent[1] * tangent[1] +
+                                               tangent[2] * tangent[2]);
+        if (!std::isfinite(tangent_length) || tangent_length < 0.000001f) {
+            return false;
+        }
+        for (int component = 0; component < 3; ++component) {
+            tangent[component] /= tangent_length;
+        }
+        bitangent[0] = normal[1] * tangent[2] - normal[2] * tangent[1];
+        bitangent[1] = normal[2] * tangent[0] - normal[0] * tangent[2];
+        bitangent[2] = normal[0] * tangent[1] - normal[1] * tangent[0];
+    }
+
+    for (int vector = 0; vector < 2; ++vector) {
+        float length_squared = 0.0f;
+        float *value = vector == 0 ? tangent : bitangent;
+        for (float component : {value[0], value[1], value[2]}) {
+            length_squared += component * component;
+        }
+        const float length = std::sqrt(length_squared);
+        if (!std::isfinite(length) || length < 0.000001f) {
+            return false;
+        }
+        for (int component = 0; component < 3; ++component) {
+            value[component] /= length;
+        }
+    }
+
+    return true;
+}
+
+static bool gfx_water_capture_vertex_is_finite(const LoadedVertex *vertex) {
+    if (vertex == nullptr || !std::isfinite(vertex->x) ||
+        !std::isfinite(vertex->y) || !std::isfinite(vertex->z) ||
+        !std::isfinite(vertex->w) || std::fabs(vertex->w) < 0.000001f) {
+        return false;
+    }
+    /* Keep triangles crossing the homogeneous camera plane. OpenGL performs
+     * the homogeneous_clip interpolation; rejecting only non-finite values
+     * preserves the visible portion instead of losing a valid distant edge. */
+    return std::isfinite(vertex->x / vertex->w) &&
+           std::isfinite(vertex->y / vertex->w);
+}
+
+static float gfx_water_capture_clip_to_ndc(float clip, float w) {
+    if (!std::isfinite(clip) || !std::isfinite(w) || std::fabs(w) < 0.000001f) {
+        return 0.0f;
+    }
+    const float ndc = clip / w;
+    return std::isfinite(ndc) ? ndc : 0.0f;
+}
+
+static void gfx_capture_water_triangle(const LoadedVertex *v1,
+                                       const LoadedVertex *v2,
+                                       const LoadedVertex *v3)
+{
+    if (g_water_material_enabled &&
+        geWaterCompositeTier(g_render_mode) != GE_WATER_COMPOSITE_DISABLED &&
+        gfx_water_capture_vertex_is_finite(v1) &&
+        gfx_water_capture_vertex_is_finite(v2) &&
+        gfx_water_capture_vertex_is_finite(v3)) {
+        const float x0 = gfx_water_capture_clip_to_ndc(v1->x, v1->w);
+        const float y0 = gfx_water_capture_clip_to_ndc(v1->y, v1->w);
+        const float x1 = gfx_water_capture_clip_to_ndc(v2->x, v2->w);
+        const float y1 = gfx_water_capture_clip_to_ndc(v2->y, v2->w);
+        const float x2 = gfx_water_capture_clip_to_ndc(v3->x, v3->w);
+        const float y2 = gfx_water_capture_clip_to_ndc(v3->y, v3->w);
+        const float pixel_area = geWaterCompositeTriangleArea(
+            x0, y0, x1, y1, x2, y2) *
+            (float)std::max<uint32_t>(rdp.viewport.width, 1) *
+            (float)std::max<uint32_t>(rdp.viewport.height, 1) * 0.25f;
+        if (!std::isfinite(pixel_area) || pixel_area <= 0.25f) {
+            return;
+        }
+
+        /* A malformed display list must not be able to grow this capture
+         * without bound. A normal water fan is only a handful of triangles;
+         * the cap is deliberately generous for split-screen and future
+         * tessellation while keeping the per-frame allocation bounded. */
+        static constexpr size_t kMaxWaterCompositeVertices = 3 * 2048;
+        if (g_water_composite_vertices.size() + 3 > kMaxWaterCompositeVertices) {
+            if (g_water_trace) {
+                sysLogPrintf(LOG_WARNING,
+                             "WATER_CAPTURE: overflow dropped=1 capacity=%zu",
+                             kMaxWaterCompositeVertices);
+            }
+            return;
+        }
+
+        if (!g_water_camera_valid) {
+            g_water_camera_valid = gfx_capture_water_camera();
+            if (!g_water_camera_valid) {
+                return;
+            }
+        }
+
+        float surface_plane[4];
+        float view_plane[4];
+        float tangent[3];
+        float bitangent[3];
+        if (!gfx_water_build_surface_frame(v1, v2, v3, surface_plane,
+                                           view_plane, tangent, bitangent)) {
+            return;
+        }
+        const uint32_t requested_surface_id = g_water_surface_id++;
+        const uint32_t reflection_surface_index =
+            gfx_water_register_surface(surface_plane, view_plane,
+                                       requested_surface_id);
+        if (reflection_surface_index == std::numeric_limits<uint32_t>::max()) {
+            return;
+        }
+        const GfxClipParameters clip_parameters = gfx_rapi->get_clip_parameters();
+        const auto append_vertex = [&clip_parameters, &surface_plane,
+                                    &view_plane, &tangent, &bitangent,
+                                    reflection_surface_index](const LoadedVertex *source,
+                                                            GfxWaterCompositeVertex *target) {
+            std::memset(target, 0, sizeof(*target));
+            target->x = source->x;
+            target->y = clip_parameters.invert_y ? -source->y : source->y;
+            target->z = clip_parameters.z_is_from_0_to_1
+                            ? source->z * 0.5f + source->w * 0.5f
+                            : source->z;
+            target->w = source->w;
+            /* Fast3D's texture path consumes the same 1/32 texel convention
+             * below. Preserve it here so the material can use the authored
+             * water flow instead of a single camera-facing UV. */
+            target->water_u = source->u / 32.0f;
+            target->water_v = source->v / 32.0f;
+            target->view_x = source->view_x;
+            target->view_y = source->view_y;
+            target->view_z = source->view_z;
+            target->world_x = source->world_x;
+            target->world_y = source->world_y;
+            target->world_z = source->world_z;
+            std::memcpy(target->surface_plane, surface_plane,
+                        sizeof(target->surface_plane));
+            std::memcpy(target->view_plane, view_plane,
+                        sizeof(target->view_plane));
+            std::memcpy(target->tangent, tangent, sizeof(target->tangent));
+            std::memcpy(target->bitangent, bitangent, sizeof(target->bitangent));
+            target->surface_id = (float)reflection_surface_index;
+        };
+
+        GfxWaterCompositeVertex captured[3];
+        append_vertex(v1, &captured[0]);
+        append_vertex(v2, &captured[1]);
+        append_vertex(v3, &captured[2]);
+        g_water_composite_vertices.insert(g_water_composite_vertices.end(),
+                                          captured, captured + 3);
+    }
+}
+
+static bool gfx_water_project_fixture_vertex(
+    const float view[3], GfxWaterCompositeVertex *vertex)
+{
+    if (view == nullptr || vertex == nullptr || !g_water_camera_valid) {
+        return false;
+    }
+    for (int component = 0; component < 3; ++component) {
+        if (!std::isfinite(view[component])) {
+            return false;
+        }
+    }
+
+    /* GfxWaterCompositeCamera stores the RSP row-vector matrix in the
+     * column-major layout expected by glUniformMatrix4fv. Expand it here in
+     * the same row-vector order used by gfx_sp_vertex so a test surface is
+     * projected by the real camera, not by a screen-space shortcut. */
+    const float *matrix = g_water_camera.forward_projection;
+    const float clip[4] = {
+        view[0] * matrix[0] + view[1] * matrix[4] +
+            view[2] * matrix[8] + matrix[12],
+        view[0] * matrix[1] + view[1] * matrix[5] +
+            view[2] * matrix[9] + matrix[13],
+        view[0] * matrix[2] + view[1] * matrix[6] +
+            view[2] * matrix[10] + matrix[14],
+        view[0] * matrix[3] + view[1] * matrix[7] +
+            view[2] * matrix[11] + matrix[15],
+    };
+    if (!std::isfinite(clip[0]) || !std::isfinite(clip[1]) ||
+        !std::isfinite(clip[2]) || !std::isfinite(clip[3]) ||
+        std::fabs(clip[3]) < 0.000001f) {
+        return false;
+    }
+    vertex->x = gfx_adjust_x_for_aspect_ratio(clip[0], clip[3]);
+    vertex->y = g_water_camera.invert_y ? -clip[1] : clip[1];
+    vertex->z = g_water_camera.depth_convention
+                    ? clip[2] * 0.5f + clip[3] * 0.5f
+                    : clip[2];
+    vertex->w = clip[3];
+    return std::isfinite(vertex->x) && std::isfinite(vertex->y) &&
+           std::isfinite(vertex->z) && std::isfinite(vertex->w);
+}
+
+static bool gfx_water_fixture_surface_frame(
+    GfxWaterCompositeVertex fixture[3], float world_plane[4],
+    float view_plane[4], float tangent[3], float bitangent[3])
+{
+    float world_points[3][3];
+    float view_points[3][3];
+    for (int index = 0; index < 3; ++index) {
+        world_points[index][0] = fixture[index].world_x;
+        world_points[index][1] = fixture[index].world_y;
+        world_points[index][2] = fixture[index].world_z;
+        view_points[index][0] = fixture[index].view_x;
+        view_points[index][1] = fixture[index].view_y;
+        view_points[index][2] = fixture[index].view_z;
+    }
+    if (!gfx_water_plane_from_points(world_points, world_plane) ||
+        !gfx_water_plane_from_points(view_points, view_plane)) {
+        return false;
+    }
+
+    const float edge[3] = {
+        world_points[1][0] - world_points[0][0],
+        world_points[1][1] - world_points[0][1],
+        world_points[1][2] - world_points[0][2],
+    };
+    const float projection = edge[0] * world_plane[0] +
+                             edge[1] * world_plane[1] +
+                             edge[2] * world_plane[2];
+    float tangent_length_squared = 0.0f;
+    for (int component = 0; component < 3; ++component) {
+        tangent[component] = edge[component] -
+                             world_plane[component] * projection;
+        tangent_length_squared += tangent[component] * tangent[component];
+    }
+    const float tangent_length = std::sqrt(tangent_length_squared);
+    if (!std::isfinite(tangent_length) || tangent_length < 0.000001f) {
+        return false;
+    }
+    for (int component = 0; component < 3; ++component) {
+        tangent[component] /= tangent_length;
+    }
+    bitangent[0] = world_plane[1] * tangent[2] -
+                   world_plane[2] * tangent[1];
+    bitangent[1] = world_plane[2] * tangent[0] -
+                   world_plane[0] * tangent[2];
+    bitangent[2] = world_plane[0] * tangent[1] -
+                   world_plane[1] * tangent[0];
+    return true;
+}
+
+/* Convert the column-major matrix exposed at the rendering boundary back to
+ * the row-vector representation used by the RSP inverse helper. Keeping this
+ * conversion in one place prevents the split-screen fixture from introducing
+ * a second, subtly different projection convention. */
+static bool gfx_water_inverse_gl_matrix(const float input[16], float output[16])
+{
+    if (input == nullptr || output == nullptr) {
+        return false;
+    }
+    float row_matrix[4][4] = {};
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            row_matrix[row][column] = input[column * 4 + row];
+        }
+    }
+    return gfx_matrix_inverse_for_water(row_matrix, output);
+}
+
+static bool gfx_water_transform_gl_point(const float matrix[16],
+                                         const float point[3],
+                                         float output[3])
+{
+    if (matrix == nullptr || point == nullptr || output == nullptr) {
+        return false;
+    }
+    float homogeneous[4] = {};
+    for (int row = 0; row < 4; ++row) {
+        homogeneous[row] = point[0] * matrix[0 * 4 + row] +
+                           point[1] * matrix[1 * 4 + row] +
+                           point[2] * matrix[2 * 4 + row] +
+                           matrix[3 * 4 + row];
+    }
+    if (!std::isfinite(homogeneous[3]) ||
+        std::fabs(homogeneous[3]) < 0.000001f) {
+        return false;
+    }
+    for (int component = 0; component < 3; ++component) {
+        output[component] = homogeneous[component] / homogeneous[3];
+        if (!std::isfinite(output[component])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool gfx_water_make_world_surface_vertex(const float world[3],
+                                                 float water_u, float water_v,
+                                                 GfxWaterCompositeVertex *vertex)
+{
+    if (world == nullptr || vertex == nullptr || !g_water_camera_valid) {
+        return false;
+    }
+
+    float view[3] = {};
+    if (!gfx_water_transform_gl_point(g_water_camera.world_to_view, world,
+                                      view)) {
+        return false;
+    }
+
+    std::memset(vertex, 0, sizeof(*vertex));
+    vertex->world_x = world[0];
+    vertex->world_y = world[1];
+    vertex->world_z = world[2];
+    vertex->view_x = view[0];
+    vertex->view_y = view[1];
+    vertex->view_z = view[2];
+    vertex->water_u = water_u;
+    vertex->water_v = water_v;
+    return gfx_water_project_fixture_vertex(view, vertex);
+}
+
+/* Build a finite patch on the authored horizontal water plane in world
+ * space. The patch follows the camera only as an implementation detail for an
+ * otherwise unbounded sea; its vertices, plane, UVs, and occlusion all remain
+ * world-space data. This is deliberately separate from sky.c's projected
+ * screen-space fan. */
+static bool gfx_submit_world_water_surface(uint32_t stage_id,
+                                           float water_height)
+{
+    if (!gfx_water_world_surface_enabled() ||
+        !std::isfinite(water_height) ||
+        !g_water_scene_replay_snapshot_valid) {
+        return false;
+    }
+    if (!g_water_camera_valid) {
+        g_water_camera_valid = gfx_capture_water_camera();
+    }
+    if (!g_water_camera_valid) {
+        if (getenv("GE_WATER_TRACE") != nullptr) {
+            sysLogPrintf(LOG_WARNING,
+                         "WATER_WORLD_SURFACE: stage=%u status=no-camera",
+                         stage_id);
+        }
+        return false;
+    }
+
+    float inverse_world_to_view[16] = {};
+    if (!gfx_water_inverse_gl_matrix(g_water_camera.world_to_view,
+                                     inverse_world_to_view)) {
+        if (getenv("GE_WATER_TRACE") != nullptr) {
+            sysLogPrintf(LOG_WARNING,
+                         "WATER_WORLD_SURFACE: stage=%u status=singular-view",
+                         stage_id);
+        }
+        return false;
+    }
+
+    const float origin[3] = {0.0f, 0.0f, 0.0f};
+    float camera_world[3] = {};
+    if (!gfx_water_transform_gl_point(inverse_world_to_view, origin,
+                                      camera_world)) {
+        if (getenv("GE_WATER_TRACE") != nullptr) {
+            sysLogPrintf(LOG_WARNING,
+                         "WATER_WORLD_SURFACE: stage=%u status=no-position",
+                         stage_id);
+        }
+        return false;
+    }
+
+    const float extent = std::max(
+        4096.0f, std::min(20000.0f, g_water_camera.far_plane * 1.5f));
+    const float points[6][3] = {
+        {camera_world[0] - extent, water_height, camera_world[2] - extent},
+        {camera_world[0] - extent, water_height, camera_world[2] + extent},
+        {camera_world[0] + extent, water_height, camera_world[2] + extent},
+        {camera_world[0] - extent, water_height, camera_world[2] - extent},
+        {camera_world[0] + extent, water_height, camera_world[2] + extent},
+        {camera_world[0] + extent, water_height, camera_world[2] - extent},
+    };
+    GfxWaterCompositeVertex surface[6] = {};
+    for (int index = 0; index < 6; ++index) {
+        float water_u = 0.0f;
+        float water_v = 0.0f;
+        if (!geWaterSurfaceUvFromWorld(
+                points[index][0], points[index][2], &water_u, &water_v)) {
+            if (getenv("GE_WATER_TRACE") != nullptr) {
+                sysLogPrintf(LOG_WARNING,
+                             "WATER_WORLD_SURFACE: stage=%u status=uv",
+                             stage_id);
+            }
+            return false;
+        }
+        if (!gfx_water_make_world_surface_vertex(
+                points[index], water_u, water_v, &surface[index])) {
+            if (getenv("GE_WATER_TRACE") != nullptr) {
+                sysLogPrintf(LOG_WARNING,
+                             "WATER_WORLD_SURFACE: stage=%u status=projection",
+                             stage_id);
+            }
+            return false;
+        }
+    }
+
+    float world_plane[4] = {};
+    float view_plane[4] = {};
+    float tangent[3] = {};
+    float bitangent[3] = {};
+    if (!gfx_water_fixture_surface_frame(surface, world_plane, view_plane,
+                                         tangent, bitangent)) {
+        if (getenv("GE_WATER_TRACE") != nullptr) {
+            sysLogPrintf(LOG_WARNING,
+                         "WATER_WORLD_SURFACE: stage=%u status=degenerate",
+                         stage_id);
+        }
+        return false;
+    }
+
+    const uint32_t requested_surface_id = g_water_surface_id++;
+    const uint32_t reflection_surface_index =
+        gfx_water_register_surface(world_plane, view_plane,
+                                   requested_surface_id);
+    if (reflection_surface_index == std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    for (GfxWaterCompositeVertex &vertex : surface) {
+        std::memcpy(vertex.surface_plane, world_plane,
+                    sizeof(vertex.surface_plane));
+        std::memcpy(vertex.view_plane, view_plane,
+                    sizeof(vertex.view_plane));
+        std::memcpy(vertex.tangent, tangent, sizeof(vertex.tangent));
+        std::memcpy(vertex.bitangent, bitangent, sizeof(vertex.bitangent));
+        vertex.surface_id = (float)reflection_surface_index;
+    }
+    g_water_composite_vertices.insert(g_water_composite_vertices.end(),
+                                      surface, surface + 6);
+    g_water_world_surface_submitted = true;
+
+    if (g_water_trace < 0) {
+        g_water_trace = getenv("GE_WATER_TRACE") != nullptr;
+    }
+    if (g_water_trace && g_water_world_surface_trace_events < 8) {
+        sysLogPrintf(LOG_NOTE,
+                     "WATER_WORLD_SURFACE: stage=%u height=%0.3f triangles=2 source=world-surface",
+                     stage_id, (double)water_height);
+        sysLogPrintf(LOG_NOTE,
+                     "WATER_CAPTURE: source=world-surface triangles=2 surface=%u",
+                     reflection_surface_index);
+        ++g_water_world_surface_trace_events;
+    }
+    return true;
+}
+
+static bool gfx_water_make_fixture_vertex(const float ndc[3],
+                                          GfxWaterCompositeVertex *vertex)
+{
+    if (ndc == nullptr || vertex == nullptr || !g_water_camera_valid) {
+        return false;
+    }
+    float inverse_world_to_clip[16] = {};
+    if (!gfx_water_inverse_gl_matrix(g_water_camera.world_to_clip,
+                                    inverse_world_to_clip)) {
+        return false;
+    }
+    float world_position[3] = {};
+    if (!gfx_water_transform_gl_point(inverse_world_to_clip, ndc,
+                                     world_position)) {
+        return false;
+    }
+    float view_position[3] = {};
+    if (!gfx_water_transform_gl_point(g_water_camera.world_to_view,
+                                     world_position, view_position)) {
+        return false;
+    }
+
+    std::memset(vertex, 0, sizeof(*vertex));
+    vertex->world_x = world_position[0];
+    vertex->world_y = world_position[1];
+    vertex->world_z = world_position[2];
+    vertex->view_x = view_position[0];
+    vertex->view_y = view_position[1];
+    vertex->view_z = view_position[2];
+    vertex->water_u = ndc[0] * 0.5f + 0.5f;
+    vertex->water_v = ndc[1] * 0.5f + 0.5f;
+    return gfx_water_project_fixture_vertex(view_position, vertex);
+}
+
+/* Multiplayer environment records do not author a sky-water fan for
+ * Frigate, although the renderer still has to support independent water
+ * composites in both player viewports. This opt-in adapter creates a
+ * camera-projected quad only for that integration test. It goes through the
+ * same captured camera, surface-plane registration, reflection replay, and
+ * OpenGL composite as authored water; no production display list is changed. */
+static bool gfx_water_append_test_split_fixture(void)
+{
+    const char *fixture = getenv("GE_WATER_TEST_SPLIT");
+    if (fixture == nullptr || std::strcmp(fixture, "1") != 0 ||
+        !g_water_scene_replay_snapshot_valid ||
+        !g_water_composite_vertices.empty()) {
+        return false;
+    }
+    if (!g_water_camera_valid) {
+        g_water_camera_valid = gfx_capture_water_camera();
+    }
+    if (!g_water_camera_valid) {
+        return false;
+    }
+
+    const float ndc[6][3] = {
+        {-0.92f, -0.86f, -0.70f},
+        { 0.92f, -0.86f, -0.70f},
+        { 0.92f,  0.86f, -0.70f},
+        {-0.92f, -0.86f, -0.70f},
+        { 0.92f,  0.86f, -0.70f},
+        {-0.92f,  0.86f, -0.70f},
+    };
+    GfxWaterCompositeVertex surface[6] = {};
+    for (int index = 0; index < 6; ++index) {
+        if (!gfx_water_make_fixture_vertex(ndc[index], &surface[index])) {
+            return false;
+        }
+    }
+
+    float world_plane[4] = {};
+    float view_plane[4] = {};
+    float tangent[3] = {};
+    float bitangent[3] = {};
+    if (!gfx_water_fixture_surface_frame(surface, world_plane, view_plane,
+                                         tangent, bitangent)) {
+        return false;
+    }
+    const uint32_t requested_surface_id = g_water_surface_id++;
+    const uint32_t reflection_surface_index =
+        gfx_water_register_surface(world_plane, view_plane,
+                                   requested_surface_id);
+    if (reflection_surface_index == std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    for (GfxWaterCompositeVertex &vertex : surface) {
+        std::memcpy(vertex.surface_plane, world_plane,
+                    sizeof(vertex.surface_plane));
+        std::memcpy(vertex.view_plane, view_plane,
+                    sizeof(vertex.view_plane));
+        std::memcpy(vertex.tangent, tangent, sizeof(vertex.tangent));
+        std::memcpy(vertex.bitangent, bitangent, sizeof(vertex.bitangent));
+        vertex.surface_id = (float)reflection_surface_index;
+    }
+    g_water_composite_vertices.insert(g_water_composite_vertices.end(),
+                                      surface, surface + 6);
+    g_water_material_enabled = true;
+    if (getenv("GE_WATER_TRACE") != nullptr &&
+        g_water_split_fixture_trace_events < 8) {
+        sysLogPrintf(LOG_NOTE,
+                     "WATER_SPLIT_FIXTURE: enabled=1 triangles=2 surfaces=%u",
+                     g_water_camera.surface_count);
+        ++g_water_split_fixture_trace_events;
+    }
+    return true;
+}
+
+/* A deterministic, port-only fixture for exercising the multi-surface API.
+ * It creates a genuinely non-coplanar second triangle from the captured
+ * water geometry, then sends it through the same plane registration and GL
+ * vertex stream as authored water. Production frames never enter this path. */
+static void gfx_water_append_test_surface_fixture(void)
+{
+    const char *fixture = getenv("GE_WATER_TEST_SURFACES");
+    if (fixture == nullptr || std::strcmp(fixture, "2") != 0 ||
+        !g_water_camera_valid || g_water_camera.surface_count == 0 ||
+        g_water_composite_vertices.size() < 3 ||
+        g_water_camera.surface_count >= GFX_WATER_MAX_SURFACES) {
+        return;
+    }
+
+    GfxWaterCompositeVertex surface[3] = {
+        g_water_composite_vertices[0],
+        g_water_composite_vertices[1],
+        g_water_composite_vertices[2],
+    };
+    const float world_normal[3] = {
+        surface[0].surface_plane[0],
+        surface[0].surface_plane[1],
+        surface[0].surface_plane[2],
+    };
+    const float view_normal[3] = {
+        g_water_camera.surfaces[0].view_plane[0],
+        g_water_camera.surfaces[0].view_plane[1],
+        g_water_camera.surfaces[0].view_plane[2],
+    };
+    const float offsets[3] = {0.0f, 0.75f, -0.25f};
+    for (int index = 0; index < 3; ++index) {
+        surface[index].world_x += world_normal[0] * offsets[index];
+        surface[index].world_y += world_normal[1] * offsets[index];
+        surface[index].world_z += world_normal[2] * offsets[index];
+        surface[index].view_x += view_normal[0] * offsets[index];
+        surface[index].view_y += view_normal[1] * offsets[index];
+        surface[index].view_z += view_normal[2] * offsets[index];
+        if (!gfx_water_project_fixture_vertex(
+                &surface[index].view_x, &surface[index])) {
+            return;
+        }
+        surface[index].water_u += 0.17f;
+        surface[index].water_v += 0.11f;
+    }
+
+    float world_plane[4];
+    float view_plane[4];
+    float tangent[3];
+    float bitangent[3];
+    if (!gfx_water_fixture_surface_frame(surface, world_plane, view_plane,
+                                         tangent, bitangent)) {
+        return;
+    }
+    const uint32_t requested_surface_id = g_water_surface_id++;
+    const uint32_t reflection_surface_index =
+        gfx_water_register_surface(world_plane, view_plane,
+                                   requested_surface_id);
+    if (reflection_surface_index == std::numeric_limits<uint32_t>::max()) {
+        return;
+    }
+    for (GfxWaterCompositeVertex &vertex : surface) {
+        std::memcpy(vertex.surface_plane, world_plane,
+                    sizeof(vertex.surface_plane));
+        std::memcpy(vertex.view_plane, view_plane,
+                    sizeof(vertex.view_plane));
+        std::memcpy(vertex.tangent, tangent, sizeof(vertex.tangent));
+        std::memcpy(vertex.bitangent, bitangent, sizeof(vertex.bitangent));
+        vertex.surface_id = (float)reflection_surface_index;
+    }
+    g_water_composite_vertices.insert(g_water_composite_vertices.end(),
+                                      surface, surface + 3);
+    if (getenv("GE_WATER_TRACE") != nullptr) {
+        sysLogPrintf(LOG_NOTE,
+                     "WATER_SURFACE_BATCH: surface_count=%u fixture=non-coplanar",
+                     g_water_camera.surface_count);
+    }
+}
+
+static LoadedVertex gfx_water_interpolate_reflection_vertex(
+    const LoadedVertex &from, const LoadedVertex &to, float amount) {
+    const auto mix = [amount](float left, float right) {
+        return left + (right - left) * amount;
+    };
+    LoadedVertex result = from;
+    result.u = mix(from.u, to.u);
+    result.v = mix(from.v, to.v);
+    result.source_view_x = mix(from.source_view_x, to.source_view_x);
+    result.source_view_y = mix(from.source_view_y, to.source_view_y);
+    result.source_view_z = mix(from.source_view_z, to.source_view_z);
+    result.world_x = mix(from.world_x, to.world_x);
+    result.world_y = mix(from.world_y, to.world_y);
+    result.world_z = mix(from.world_z, to.world_z);
+    result.reflection_plane_distance = 0.0f;
+    result.color.r = (uint8_t)clampf(mix((float)from.color.r,
+                                         (float)to.color.r), 0.0f, 255.0f);
+    result.color.g = (uint8_t)clampf(mix((float)from.color.g,
+                                         (float)to.color.g), 0.0f, 255.0f);
+    result.color.b = (uint8_t)clampf(mix((float)from.color.b,
+                                         (float)to.color.b), 0.0f, 255.0f);
+    result.color.a = (uint8_t)clampf(mix((float)from.color.a,
+                                         (float)to.color.a), 0.0f, 255.0f);
+    result.fog = (uint8_t)clampf(mix((float)from.fog, (float)to.fog),
+                                  0.0f, 255.0f);
+    gfx_water_project_reflected_vertex(&result);
+    return result;
+}
+
+static size_t gfx_water_clip_reflection_triangle(
+    const LoadedVertex *const source[3], LoadedVertex clipped[4]) {
+    if (source == nullptr || clipped == nullptr ||
+        !g_water_reflection_plane_valid) {
+        return 0;
+    }
+
+    size_t clipped_count = 0;
+    const LoadedVertex *previous = source[2];
+    float previous_distance = previous->reflection_plane_distance *
+                              g_water_reflection_visible_side;
+    bool previous_inside = previous_distance >= -0.0001f;
+    for (int index = 0; index < 3; ++index) {
+        const LoadedVertex *current = source[index];
+        const float current_distance = current->reflection_plane_distance *
+                                       g_water_reflection_visible_side;
+        const bool current_inside = current_distance >= -0.0001f;
+        if (previous_inside != current_inside) {
+            const float denominator = previous_distance - current_distance;
+            if (std::fabs(denominator) > 0.000001f && clipped_count < 4) {
+                const float amount = clampf(
+                    previous_distance / denominator, 0.0f, 1.0f);
+                clipped[clipped_count++] =
+                    gfx_water_interpolate_reflection_vertex(
+                        *previous, *current, amount);
+            }
+        }
+        if (current_inside && clipped_count < 4) {
+            clipped[clipped_count++] = *current;
+        }
+        previous = current;
+        previous_distance = current_distance;
+        previous_inside = current_inside;
+    }
+    return clipped_count;
+}
+
+static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx,
+                        uint8_t vtx3_idx, bool is_rect);
+
+static void gfx_sp_tri1_vertices(struct LoadedVertex *v1,
+                                 struct LoadedVertex *v2,
+                                 struct LoadedVertex *v3,
+                                 bool is_rect) {
+    if (g_water_reflection_replay && g_water_material_enabled) {
+        /* Replay only opaque scene geometry. The source water fan is rendered
+         * later by the composite and must not recursively enter its own
+         * reflection target. */
+        return;
+    }
     struct LoadedVertex* v_arr[3] = { v1, v2, v3 };
 
     if ((rsp.extra_geometry_mode & G_NO_CLIPPING_EXT) == 0) {
@@ -2062,6 +3680,21 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bo
         }
     }
 
+    const size_t water_vertices_before = g_water_composite_vertices.size();
+    gfx_capture_water_triangle(v1, v2, v3);
+    const bool water_triangle_captured =
+        g_water_composite_vertices.size() > water_vertices_before;
+    if (water_triangle_captured && g_render_mode >= GFX_RENDER_ENHANCED) {
+        /* Enhanced water is an opaque-scene exclusion boundary: its source
+         * triangle is consumed by the later composite and must not be copied
+         * into the scene/reflection targets as recursive water colour. */
+        if (g_water_trace && g_water_trace_events < 8) {
+            sysLogPrintf(LOG_NOTE, "WATER_CAPTURE: opaque-only exclude_water=1");
+            ++g_water_trace_events;
+        }
+        return;
+    }
+
     bool depth_test = ((rsp.geometry_mode & G_ZBUFFER) == G_ZBUFFER || (rdp.other_mode_l & G_ZS_PRIM) == G_ZS_PRIM) &&
                       ((rdp.other_mode_h & G_CYC_1CYCLE) == G_CYC_1CYCLE || (rdp.other_mode_h & G_CYC_2CYCLE) == G_CYC_2CYCLE);
     bool depth_update = (rdp.other_mode_l & Z_UPD) == Z_UPD;
@@ -2156,6 +3789,12 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bo
     }
     if (use_blur) {
         cc_options |= (uint64_t)SHADER_OPT_BLUR;
+    }
+    if (g_water_material_enabled && g_render_mode >= GFX_RENDER_ENHANCED) {
+        cc_options |= (uint64_t)SHADER_OPT_WATER;
+        if (g_render_mode >= GFX_RENDER_REMASTER) {
+            cc_options |= (uint64_t)SHADER_OPT_WATER_REMASTER;
+        }
     }
 
     // If we are not using alpha, clear the alpha components of the combiner as they have no effect
@@ -2337,6 +3976,10 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bo
         }
     }
 
+    if (!comb->used_textures[0]) {
+        gfx_select_bump_map(0, false);
+    }
+
 #ifdef PORT
     /* D172 probe (env-gated, inert): the magenta/cyan blood/spark bug. The
      * particle records (assets/oddtextures.c globalDL_0x078..) draw a 2-cycle
@@ -2435,6 +4078,9 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bo
     bool used_textures[2];
 
     gfx_rapi->shader_get_info(prg, &num_inputs, used_textures);
+    const bool uses_view_position =
+        geFast3dMaterialUsesViewPosition(used_textures[0],
+                                          g_bump_maps_enabled ? 1 : 0) != 0;
 
     struct GfxClipParameters clip_parameters = gfx_rapi->get_clip_parameters();
 
@@ -2448,6 +4094,12 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bo
         buf_vbo[buf_vbo_len++] = clip_parameters.invert_y ? -v_arr[i]->y : v_arr[i]->y;
         buf_vbo[buf_vbo_len++] = z;
         buf_vbo[buf_vbo_len++] = w;
+
+        if (uses_view_position) {
+            buf_vbo[buf_vbo_len++] = v_arr[i]->view_x;
+            buf_vbo[buf_vbo_len++] = v_arr[i]->view_y;
+            buf_vbo[buf_vbo_len++] = v_arr[i]->view_z;
+        }
 
         for (int t = 0; t < 2; t++) {
             if (!used_textures[t]) {
@@ -2634,6 +4286,33 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bo
     }
 }
 
+static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx,
+                        uint8_t vtx3_idx, bool is_rect) {
+    LoadedVertex *v1 = &rsp.loaded_vertices[vtx1_idx];
+    LoadedVertex *v2 = &rsp.loaded_vertices[vtx2_idx];
+    LoadedVertex *v3 = &rsp.loaded_vertices[vtx3_idx];
+    if (!g_water_reflection_replay || !g_water_reflection_plane_valid) {
+        gfx_sp_tri1_vertices(v1, v2, v3, is_rect);
+        return;
+    }
+
+    /* GPU Gems' reflection pass clips against the water plane before raster
+     * projection. Do the equivalent in the replay's view space, including
+     * edge intersections, so a wall or ship crossing the surface cannot leak
+     * its below-water half into the planar target. */
+    const LoadedVertex *source[3] = {v1, v2, v3};
+    LoadedVertex clipped[4] = {};
+    const size_t clipped_count =
+        gfx_water_clip_reflection_triangle(source, clipped);
+    if (clipped_count < 3) {
+        return;
+    }
+    for (size_t index = 1; index + 1 < clipped_count; ++index) {
+        gfx_sp_tri1_vertices(&clipped[0], &clipped[index],
+                             &clipped[index + 1], is_rect);
+    }
+}
+
 static inline void gfx_sp_tri4(Gfx *cmd) {
     // the game issues gSPTri2 for quads, which uses G_TRI4 with 2 empty triangles
     uint8_t x = C1(0, 4);
@@ -2813,6 +4492,32 @@ static void gfx_calc_and_set_viewport(const Vp_t* viewport) {
 
     gfx_adjust_viewport_or_scissor(&rdp.viewport);
 
+    /* Keep the final presentation pass aware of each game's actual player
+     * rectangle. The full-screen UI draw below does not replace these records,
+     * so a split frame can never blur across the player boundary. */
+    {
+        const GfxPostFxViewport mapped = {
+            rdp.viewport.x,
+            rdp.viewport.y,
+            rdp.viewport.width,
+            rdp.viewport.height};
+        bool already_recorded = false;
+        for (const GfxPostFxViewport &existing : g_postfx_viewports) {
+            if (existing.x == mapped.x && existing.y == mapped.y &&
+                existing.width == mapped.width && existing.height == mapped.height) {
+                already_recorded = true;
+                break;
+            }
+        }
+        if (!already_recorded) {
+            if (g_postfx_viewports.size() < kPostFxMaxViewports) {
+                g_postfx_viewports.push_back(mapped);
+            } else {
+                g_postfx_viewport_overflow = true;
+            }
+        }
+    }
+
 #ifdef PORT
     {
         static int trace_enabled = -1;
@@ -2875,9 +4580,60 @@ static void gfx_calc_and_set_viewport(const Vp_t* viewport) {
 }
 
 static void gfx_sp_movemem(uint8_t index, uint8_t offset, const void* data) {
-    if (!fast3d_ptr_ok(data)) {
+    const bool data_mapped = fast3d_ptr_ok(data);
+    if (getenv("GE_LIGHT_TRACE") != nullptr && g_light_trace_events < 32) {
+        sysLogPrintf(LOG_NOTE,
+                     "FAST3D_LIGHT_TRACE: movemem index=0x%02x data=%p mapped=%d configured=%u",
+                     (unsigned)index, data, data_mapped ? 1 : 0,
+                     (unsigned)rsp.current_num_lights);
+        ++g_light_trace_events;
+    }
+    if (!data_mapped) {
         return; /* D146: corrupt DL -> wild pointer */
     }
+
+    uint8_t light_index = 0;
+    if (geFast3dLightSlotFromMoveMem(index, &light_index)) {
+        if (rsp.current_num_lights == 0 ||
+            light_index >= rsp.current_num_lights) {
+            static int invalid_light_upload_warnings = 0;
+            if (invalid_light_upload_warnings++ < 8) {
+                sysLogPrintf(LOG_WARNING,
+                             "FAST3D_LIGHT: ignoring slot %u upload with %u configured records",
+                             (unsigned)light_index,
+                             (unsigned)rsp.current_num_lights);
+            }
+            return;
+        }
+
+        if (light_index == rsp.current_num_lights - 1) {
+            geFast3dCopyAmbientLight(
+                &rsp.current_lights[light_index],
+                static_cast<const Ambient_t *>(data));
+        } else {
+            memcpy(rsp.current_lights + light_index, data, sizeof(Light_t));
+        }
+        rsp.light_upload_mask |= (uint16_t)(1U << light_index);
+        const uint16_t required_mask =
+            (uint16_t)((1U << rsp.current_num_lights) - 1U);
+        rsp.light_state_valid = rsp.light_upload_mask == required_mask;
+        if (getenv("GE_LIGHT_TRACE") != nullptr && g_light_trace_events < 32) {
+            sysLogPrintf(LOG_NOTE,
+                         "FAST3D_LIGHT_TRACE: slot=%u ambient=%d mask=0x%04x required=0x%04x valid=%d colour=%u,%u,%u",
+                         (unsigned)light_index,
+                         light_index == rsp.current_num_lights - 1 ? 1 : 0,
+                         (unsigned)rsp.light_upload_mask,
+                         (unsigned)required_mask,
+                         rsp.light_state_valid ? 1 : 0,
+                         (unsigned)rsp.current_lights[light_index].col[0],
+                         (unsigned)rsp.current_lights[light_index].col[1],
+                         (unsigned)rsp.current_lights[light_index].col[2]);
+            ++g_light_trace_events;
+        }
+        rsp.lights_changed = true;
+        return;
+    }
+
     switch (index) {
         case G_MV_VIEWPORT:
             gfx_calc_and_set_viewport((const Vp_t*)data);
@@ -2890,23 +4646,65 @@ static void gfx_sp_movemem(uint8_t index, uint8_t offset, const void* data) {
             rsp.lookat_enabled = (index == 0) || (rsp.lookat[1].dir[0] || rsp.lookat[1].dir[1]);
             rsp.lights_changed = true;
             break;
-        case G_MV_L0:
-        case G_MV_L1:
-        case G_MV_L2:
-            // NOTE: reads out of bounds if it is an ambient light
-            memcpy(rsp.current_lights + (index - G_MV_L0) / 2, data, sizeof(Light_t));
-            break;
     }
 }
 
 static void gfx_sp_moveword(uint8_t index, uint16_t offset, uintptr_t data) {
     switch (index) {
         case G_MW_NUMLIGHT:
-            // Ambient light is included
-            // The 31th bit is a flag that lights should be recalculated
-            rsp.current_num_lights = (data - 0x80000000U) / 32;
-            rsp.lights_changed = 1;
+        {
+            uint8_t total_records = 0;
+            uint8_t directional_count = 0;
+            if (!geFast3dDecodeLightCount((uint32_t)data,
+                                          &total_records,
+                                          &directional_count)) {
+                static int invalid_light_count_warnings = 0;
+                if (invalid_light_count_warnings++ < 8) {
+                    sysLogPrintf(LOG_WARNING,
+                                 "FAST3D_LIGHT: ignoring invalid light count 0x%08x",
+                                 (unsigned)(uint32_t)data);
+                }
+                break;
+            }
+
+            (void)directional_count;
+            rsp.current_num_lights = total_records;
+            memset(rsp.current_lights, 0, sizeof(rsp.current_lights));
+            memset(rsp.current_lights_coeffs, 0,
+                   sizeof(rsp.current_lights_coeffs));
+            rsp.light_upload_mask = 0;
+            rsp.light_state_valid = false;
+            if (getenv("GE_LIGHT_TRACE") != nullptr && g_light_trace_events < 32) {
+                sysLogPrintf(LOG_NOTE,
+                             "FAST3D_LIGHT_TRACE: numlight encoded=0x%08x records=%u directional=%u",
+                             (unsigned)(uint32_t)data,
+                             (unsigned)total_records,
+                             (unsigned)directional_count);
+                ++g_light_trace_events;
+            }
+            rsp.lights_changed = true;
             break;
+        }
+        case G_MW_LIGHTCOL:
+        {
+            uint8_t light_index = 0;
+            if (!geFast3dLightColorSlot(offset, &light_index) ||
+                rsp.current_num_lights == 0 ||
+                light_index >= rsp.current_num_lights - 1) {
+                static int invalid_light_color_warnings = 0;
+                if (invalid_light_color_warnings++ < 8) {
+                    sysLogPrintf(LOG_WARNING,
+                                 "FAST3D_LIGHT: ignoring color offset 0x%04x for %u records",
+                                 (unsigned)offset,
+                                 (unsigned)rsp.current_num_lights);
+                }
+                break;
+            }
+            geFast3dApplyLightColor(&rsp.current_lights[light_index],
+                                    (uint32_t)data);
+            rsp.lights_changed = true;
+            break;
+        }
         case G_MW_FOG:
             rsp.fog_mul = (int16_t)(data >> 16);
             rsp.fog_offset = (int16_t)data;
@@ -3080,6 +4878,7 @@ static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t
     loaded_texture.tex_flags = rdp.texture_to_load.tex_flags;
     loaded_texture.raw_tex_metadata = rdp.texture_to_load.raw_tex_metadata;
     loaded_texture.addr = rdp.texture_to_load.addr;
+    loaded_texture.source_addr = rdp.texture_to_load.addr;
     loaded_texture.src_fmt = rdp.texture_to_load.fmt; /* D229 */
 
     rdp.textures_changed[0] = rdp.textures_changed[1] = true;
@@ -3121,6 +4920,7 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
     loaded_texture.tex_flags = rdp.texture_to_load.tex_flags;
     loaded_texture.raw_tex_metadata = rdp.texture_to_load.raw_tex_metadata;
     loaded_texture.addr = rdp.texture_to_load.addr + start_offset_bytes;
+    loaded_texture.source_addr = rdp.texture_to_load.addr;
     loaded_texture.src_fmt = rdp.texture_to_load.fmt; /* D229 */
 
     rdp.texture_tile[tile].uls = uls;
@@ -3536,6 +5336,11 @@ static void gfx_run_dl(Gfx* cmd) {
     uint64_t ourHash = -1;
 
     for (;;) {
+        if (g_water_reflection_replay &&
+            g_water_scene_replay_stop != nullptr &&
+            cmd == g_water_scene_replay_stop) {
+            return;
+        }
         uint32_t opcode = cmd->words.w0 >> 24;
         // gfx_print_cmd(cmd);
         switch (opcode) {
@@ -3599,6 +5404,53 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             case G_EXTRAGEOMETRYMODE_EXT:
                 gfx_sp_extra_geometry_mode(~C0(0, 24), cmd->words.w1);
+                break;
+            case G_BEGINWATERSCENE_EXT:
+                gfx_flush();
+                g_water_scene_replay_start = cmd + 1;
+                g_water_scene_initial_rsp = rsp;
+                g_water_scene_initial_rdp = rdp;
+                g_water_scene_initial_rendering_state = rendering_state;
+                g_water_scene_replay_snapshot_valid = true;
+                break;
+            case G_SUBMITWORLDWATER_EXT: {
+                /* Reflection replays the bounded opaque scene range. The
+                 * physical water surface is the consumer of that reflection,
+                 * not part of the reflected source, so do not append it a
+                 * second time during replay. */
+                if (g_water_reflection_replay) {
+                    break;
+                }
+                gfx_flush();
+                float water_height = 0.0f;
+                std::memcpy(&water_height, &cmd->words.w1,
+                            sizeof(water_height));
+                gfx_submit_world_water_surface(
+                    C0(0, 24), water_height);
+                break;
+            }
+            case G_SETWATERMATERIAL_EXT:
+                gfx_flush();
+                gfx_set_water_material(cmd->words.w1 != 0);
+                if (g_water_trace < 0) {
+                    g_water_trace = getenv("GE_WATER_TRACE") != nullptr;
+                }
+                if (g_water_trace && g_water_trace_events < 8) {
+                    sysLogPrintf(LOG_NOTE, "WATER_MATERIAL: enabled=%d render_mode=%d",
+                                 g_water_material_enabled ? 1 : 0, g_render_mode);
+                    ++g_water_trace_events;
+                }
+                break;
+            case G_RENDERWATERCOMPOSITE_EXT:
+                gfx_flush();
+                /* Seed opt-in multiplayer water before reflection replay so
+                 * the reflected camera sees the same registered plane as the
+                 * subsequent composite. Authored water is already captured
+                 * by G_SETWATERMATERIAL_EXT and remains untouched here. */
+                gfx_water_append_test_split_fixture();
+                gfx_water_append_test_surface_fixture();
+                g_water_reflection_replayed = gfx_render_water_reflection(cmd);
+                gfx_render_water_composite();
                 break;
             case (uint8_t)G_TRI1:
                 gfx_sp_tri1(C1(16, 8) / 10, C1(8, 8) / 10, C1(0, 8) / 10, false);
@@ -3849,7 +5701,12 @@ static void gfx_run_dl(Gfx* cmd) {
 
 static void gfx_sp_reset() {
     rsp.modelview_matrix_stack_size = 1;
-    rsp.current_num_lights = 2;
+    rsp.current_num_lights = 0;
+    rsp.light_upload_mask = 0;
+    rsp.light_state_valid = false;
+    memset(rsp.current_lights, 0, sizeof(rsp.current_lights));
+    memset(rsp.current_lights_coeffs, 0,
+           sizeof(rsp.current_lights_coeffs));
     rsp.lights_changed = true;
 }
 
@@ -3857,11 +5714,41 @@ extern "C" void gfx_get_dimensions(uint32_t* width, uint32_t* height, int32_t* p
     gfx_wapi->get_dimensions(width, height, posX, posY);
 }
 
+extern "C" size_t gfx_get_postfx_viewports(struct GfxPostFxViewport *out,
+                                             size_t capacity)
+{
+    const size_t count = g_postfx_viewport_overflow ?
+        kPostFxMaxViewports + 1 : g_postfx_viewports.size();
+    if (out == nullptr || capacity == 0) {
+        return count;
+    }
+    const size_t copied = std::min(capacity, g_postfx_viewports.size());
+    for (size_t i = 0; i < copied; ++i) {
+        out[i] = g_postfx_viewports[i];
+    }
+    return count;
+}
+
+extern "C" int gfx_get_postfx_depth_source(uintptr_t *texture,
+                                             uint32_t *width,
+                                             uint32_t *height)
+{
+    if (gfx_rapi == nullptr || gfx_rapi->get_postfx_depth_texture == nullptr) {
+        return 0;
+    }
+    return gfx_rapi->get_postfx_depth_texture(texture, width, height) ? 1 : 0;
+}
+
 extern "C" void gfx_init(const GfxInitSettings *settings) {
     gfx_wapi = settings->wapi;
     gfx_rapi = settings->rapi;
     gfx_wapi->init(&settings->window_settings);
     gfx_rapi->init();
+    g_water_elapsed_time = 0.0f;
+    g_water_delta_time = 0.0f;
+    g_water_previous_time = 0.0;
+    g_water_time_initialized = false;
+    g_water_surface_id = 0;
     gfx_rapi->update_framebuffer_parameters(0, settings->window_settings.width, settings->window_settings.height, 1, false, true, true, true);
     gfx_current_dimensions.internal_mul = 1;
     gfx_current_game_window_viewport.width = gfx_current_dimensions.width = settings->window_settings.width;
@@ -3889,10 +5776,13 @@ extern "C" void gfx_init(const GfxInitSettings *settings) {
 }
 
 extern "C" void gfx_destroy(void) {
-    // TODO: should also destroy rapi and wapi, and any other resources acquired in fast3d
-
     // Texture cache and loaded textures store references to Resources which need to be unreferenced.
     gfx_texture_cache_clear();
+    g_bump_map_sources.clear();
+    gfx_reset_water_transient_state(true); /* context_destroy */
+    if (gfx_rapi != nullptr && gfx_rapi->destroy != nullptr) {
+        gfx_rapi->destroy();
+    }
 }
 
 extern "C" struct GfxRenderingAPI* gfx_get_current_rendering_api(void) {
@@ -3900,7 +5790,63 @@ extern "C" struct GfxRenderingAPI* gfx_get_current_rendering_api(void) {
 }
 
 extern "C" void gfx_start_frame(void) {
+    if (getenv("GE_SKIP_FRAME_PREP") != nullptr) {
+        return;
+    }
     gfx_wapi->handle_events();
+    g_water_delta_time = 0.0f;
+    if (g_water_trace < 0) {
+        g_water_trace = std::getenv("GE_WATER_TRACE") != nullptr;
+    }
+    if (gfx_wapi->get_time != nullptr) {
+        const double now = gfx_wapi->get_time();
+        if (std::isfinite(now)) {
+            static bool fixed_delta_initialized = false;
+            static double fixed_delta = 0.0;
+            if (!fixed_delta_initialized) {
+                fixed_delta_initialized = true;
+                const char *fixed_delta_text =
+                    std::getenv("GE_WATER_TEST_FIXED_DELTA");
+                if (fixed_delta_text != nullptr && *fixed_delta_text != '\0') {
+                    char *end = nullptr;
+                    const double parsed = std::strtod(fixed_delta_text, &end);
+                    if (end != fixed_delta_text && *end == '\0' &&
+                        std::isfinite(parsed) && parsed > 0.0) {
+                        fixed_delta = parsed;
+                    }
+                }
+            }
+            GeWaterClockState clock = {
+                g_water_elapsed_time,
+                g_water_delta_time,
+                g_water_previous_time,
+                g_water_time_initialized ? 1 : 0,
+            };
+            geWaterClockAdvance(&clock, now, fixed_delta);
+            g_water_elapsed_time = clock.elapsed;
+            g_water_delta_time = clock.delta;
+            g_water_previous_time = clock.previous;
+            g_water_time_initialized = clock.initialized != 0;
+            if (g_water_trace && g_water_time_trace_events < 4) {
+                sysLogPrintf(LOG_NOTE,
+                             "WATER_TIME: elapsed=%0.6f delta=%0.6f source=%s",
+                             (double)g_water_elapsed_time,
+                             (double)g_water_delta_time,
+                             fixed_delta > 0.0 ? "fixed" : "host");
+                ++g_water_time_trace_events;
+            }
+        }
+    }
+    for (auto it = g_water_disturbances.begin(); it != g_water_disturbances.end();) {
+        it->age += g_water_delta_time;
+        if (it->age >= it->lifetime) {
+            it = g_water_disturbances.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    g_water_disturbance_valid = !g_water_disturbances.empty();
+    g_water_heightfield.advance(g_water_delta_time);
     gfx_wapi->get_dimensions(&gfx_current_window_dimensions.width, &gfx_current_window_dimensions.height,
                              &gfx_current_window_position_x, &gfx_current_window_position_y);
 
@@ -3921,8 +5867,44 @@ extern "C" void gfx_start_frame(void) {
      * searchlight lights between this boundary and gfx_run(). */
     gfx_world_lighting_begin_frame();
     gfx_vector_text_begin_frame();
+    gfx_reset_water_transient_state(false); /* level_restart/frame boundary */
+    /* The BDD disturbance fixture uses the same public wake adapter as game
+     * effects. It is deliberately opt-in and lives at the frame boundary so
+     * the normal lifetime/overflow policy is exercised rather than a shader
+     * uniform being edited directly by the test harness. */
+    if (const char *fixture = getenv("GE_WATER_TEST_DISTURBANCE")) {
+        const float phase = std::fmod(std::max(g_water_elapsed_time, 0.0f) *
+                                          0.25f,
+                                      0.24f);
+        if (std::strcmp(fixture, "boat-wake") == 0) {
+            gfx_water_boat_wake(0.30f + phase, 0.42f, 1.0f, 0.0f,
+                                0.80f, 0.20f);
+        } else if (std::strcmp(fixture, "dam-impact") == 0) {
+            gfx_water_ripple(0.62f, 0.38f, 0.22f, 0.040f);
+            gfx_water_ripple(0.68f, 0.41f, 0.12f, 0.025f);
+        }
+    }
+    g_postfx_viewports.clear();
+    g_postfx_viewport_overflow = false;
 
-    if (gfx_current_dimensions.height != gfx_prev_dimensions.height) {
+    const bool dimensions_changed =
+        gfx_current_dimensions.width != gfx_prev_dimensions.width ||
+        gfx_current_dimensions.height != gfx_prev_dimensions.height;
+    if (dimensions_changed &&
+        (gfx_prev_dimensions.width != 0 || gfx_prev_dimensions.height != 0)) {
+        /* Water and post-processing targets are sized to the drawable, not to
+         * the logical 320/640 game viewport. Invalidate them at the same
+         * boundary as the auto-resized game framebuffers so a resize cannot
+         * leave a stale reflection/depth texture attached to the next pass. */
+        if (gfx_rapi->on_resize != nullptr) {
+            gfx_rapi->on_resize();
+        }
+        if (getenv("GE_WATER_TRACE") != nullptr) {
+            sysLogPrintf(LOG_NOTE,
+                         "WATER_RESIZE: resources=invalidated width=%u height=%u",
+                         gfx_current_dimensions.width,
+                         gfx_current_dimensions.height);
+        }
         for (auto& fb : framebuffers) {
             uint32_t width, height, msaa;
             if (fb.second.autoresize) {
@@ -3976,6 +5958,197 @@ extern "C" void gfx_start_frame(void) {
 
 uint32_t num_dls = 0;
 
+static bool gfx_render_water_reflection(Gfx *stop_command)
+{
+    if (!g_water_scene_replay_snapshot_valid ||
+        g_water_scene_replay_start == nullptr || stop_command == nullptr ||
+        !g_water_camera_valid ||
+        g_water_camera.surface_count == 0 || gfx_rapi == nullptr ||
+        gfx_rapi->begin_water_reflection == nullptr ||
+        gfx_rapi->end_water_reflection == nullptr) {
+        return false;
+    }
+
+    const struct GfxWaterCompositeCamera *camera = &g_water_camera;
+    const decltype(rsp) saved_rsp = rsp;
+    const decltype(rdp) saved_rdp = rdp;
+    const decltype(rendering_state) saved_rendering_state = rendering_state;
+    const bool saved_water_material_enabled = g_water_material_enabled;
+    const bool saved_camera_valid = g_water_camera_valid;
+    const uint32_t saved_surface_id = g_water_surface_id;
+    const bool saved_plane_valid = g_water_reflection_plane_valid;
+    const float saved_plane[4] = {
+        g_water_reflection_plane_view[0],
+        g_water_reflection_plane_view[1],
+        g_water_reflection_plane_view[2],
+        g_water_reflection_plane_view[3],
+    };
+    const float saved_visible_side = g_water_reflection_visible_side;
+
+    const uint32_t surface_count =
+        std::min<uint32_t>(camera->surface_count, GFX_WATER_MAX_SURFACES);
+    uint32_t reflected_surface_mask = 0;
+    g_water_scene_replay_stop = stop_command;
+    g_water_reflection_replay = true;
+    g_water_material_enabled = false;
+
+    for (uint32_t surface_index = 0; surface_index < surface_count;
+         ++surface_index) {
+        const float *view_plane =
+            camera->surfaces[surface_index].view_plane;
+        bool finite_plane = true;
+        for (int component = 0; component < 4; ++component) {
+            finite_plane = finite_plane && std::isfinite(view_plane[component]);
+        }
+        const float normal_length = std::sqrt(
+            view_plane[0] * view_plane[0] +
+            view_plane[1] * view_plane[1] +
+            view_plane[2] * view_plane[2]);
+        if (!finite_plane || !std::isfinite(normal_length) ||
+            normal_length <= 0.000001f) {
+            continue;
+        }
+
+        std::memcpy(g_water_reflection_plane_view, view_plane,
+                    sizeof(g_water_reflection_plane_view));
+        g_water_reflection_plane_valid = true;
+        g_water_reflection_visible_side = view_plane[3] >= 0.0f ? 1.0f : -1.0f;
+        g_water_reflection_surface_index = surface_index;
+
+        if (!gfx_rapi->begin_water_reflection(
+                camera, view_plane, surface_index, surface_count)) {
+            continue;
+        }
+
+        /* Restore the state captured immediately before sky/world submission,
+         * so every tile observes the same matrix, texture, light, and
+         * viewport commands as the authoritative pass. */
+        rsp = g_water_scene_initial_rsp;
+        rdp = g_water_scene_initial_rdp;
+        rendering_state = g_water_scene_initial_rendering_state;
+        gfx_run_dl(g_water_scene_replay_start);
+        gfx_flush();
+        const bool tile_populated = gfx_rapi->end_water_reflection();
+        if (tile_populated) {
+            reflected_surface_mask |= (uint32_t)(1U << surface_index);
+        }
+
+        rsp = saved_rsp;
+        rdp = saved_rdp;
+        rendering_state = saved_rendering_state;
+    }
+
+    g_water_reflection_replay = false;
+    g_water_scene_replay_stop = nullptr;
+    rsp = saved_rsp;
+    rdp = saved_rdp;
+    rendering_state = saved_rendering_state;
+    g_water_material_enabled = saved_water_material_enabled;
+    g_water_camera_valid = saved_camera_valid;
+    g_water_surface_id = saved_surface_id;
+    g_water_reflection_plane_valid = saved_plane_valid;
+    std::memcpy(g_water_reflection_plane_view, saved_plane,
+                sizeof(g_water_reflection_plane_view));
+    g_water_reflection_visible_side = saved_visible_side;
+    const uint32_t required_mask =
+        surface_count == 32 ? UINT32_MAX : (uint32_t)((1U << surface_count) - 1U);
+    g_water_camera.reflection_surface_mask =
+        reflected_surface_mask == required_mask ? reflected_surface_mask : 0;
+    return g_water_camera.reflection_surface_mask != 0;
+}
+
+static void gfx_render_water_composite(void)
+{
+    /* The split-screen contract may need a deterministic water surface when
+     * the selected multiplayer environment has no authored sky-water fan.
+     * Prepare it before reflection replay so the same surface plane drives
+     * both the reflected-camera and composite passes. */
+    gfx_water_append_test_split_fixture();
+    const size_t vertex_count = g_water_composite_vertices.size();
+    const size_t triangle_count = vertex_count / 3;
+    const int tier = geWaterCompositeTier(g_render_mode);
+    const char *water_source = g_water_world_surface_submitted
+                                   ? "world-surface"
+                                   : "sky-fan";
+    const bool force_reflection_fallback =
+        getenv("GE_WATER_FORCE_REFLECTION_FALLBACK") != nullptr &&
+        strcmp(getenv("GE_WATER_FORCE_REFLECTION_FALLBACK"), "1") == 0;
+    const char *reflection_source = g_water_reflection_replayed &&
+                                            !force_reflection_fallback
+        ? "reflected-camera" : "screen-space-fallback";
+
+    if (gfx_rapi != nullptr &&
+        geWaterCompositeCanRunWithDepthFallback(g_render_mode, 1,
+                                                triangle_count) &&
+        vertex_count == triangle_count * 3 &&
+        gfx_rapi->draw_water_composite != nullptr) {
+        GfxWaterDisturbanceBatch disturbance_batch = {};
+        for (const GfxWaterActiveDisturbance &active : g_water_disturbances) {
+            if (disturbance_batch.count >= GFX_WATER_MAX_DISTURBANCES) {
+                break;
+            }
+            const float remaining = geWaterClamp01(
+                1.0f - active.age / std::max(active.lifetime, 0.0001f));
+            disturbance_batch.disturbances[disturbance_batch.count] = active.event;
+            disturbance_batch.disturbances[disturbance_batch.count].strength *= remaining;
+            ++disturbance_batch.count;
+        }
+        const GeWaterHeightfieldView source_heightfield =
+            g_water_heightfield.view();
+        const GfxWaterHeightfieldView heightfield = {
+            source_heightfield.width,
+            source_heightfield.height,
+            source_heightfield.heights,
+            source_heightfield.normal_x,
+            source_heightfield.normal_z,
+            source_heightfield.max_height,
+        };
+        const bool rendered = gfx_rapi->draw_water_composite(
+            g_water_composite_vertices.data(), vertex_count, tier,
+            disturbance_batch.count != 0 ? &disturbance_batch : nullptr,
+            &heightfield,
+            g_water_camera_valid ? &g_water_camera : nullptr,
+            g_water_elapsed_time);
+        if (rendered && g_water_trace && g_water_composite_trace_events < 8) {
+            sysLogPrintf(LOG_NOTE,
+                         "WATER_COMPOSITE: phase=post_world_before_hud tier=%d triangles=%zu reflection=%s fallback=screen-space planar_reflection=1 clip=water-plane refraction=1 contact=1 depth=scene-copy depth-test=lequal bump=height-gradient ray=projected-xy-over-depth viewport=%d,%d,%u,%u surfaces=%u disturbances=%u source=%s",
+                         tier, triangle_count,
+                         reflection_source,
+                         g_water_camera.viewport_x, g_water_camera.viewport_y,
+                         g_water_camera.viewport_width,
+                         g_water_camera.viewport_height,
+                         g_water_camera.surface_count,
+                         disturbance_batch.count, water_source);
+            ++g_water_composite_trace_events;
+        }
+    } else if (g_water_trace && g_water_composite_trace_events < 8) {
+        sysLogPrintf(LOG_WARNING,
+                     "WATER_COMPOSITE_SKIP: source=%s tier=%d vertices=%zu triangles=%zu camera=%d api=%d",
+                     water_source, tier, vertex_count, triangle_count,
+                     g_water_camera_valid ? 1 : 0,
+                     gfx_rapi != nullptr ? 1 : 0);
+    }
+
+    /* A composite belongs to one player viewport. Never let the next player
+     * reuse the previous player's projected water fan, camera projection, or
+     * disturbance event. */
+    g_water_composite_vertices.clear();
+    g_water_camera_valid = false;
+    g_water_world_surface_submitted = false;
+    g_water_disturbance_valid = false;
+    g_water_disturbances.clear();
+    g_water_surface_id = 0;
+    g_water_scene_replay_start = nullptr;
+    g_water_scene_replay_stop = nullptr;
+    g_water_scene_replay_snapshot_valid = false;
+    g_water_reflection_replayed = false;
+    g_water_reflection_plane_valid = false;
+    std::memset(g_water_reflection_plane_view, 0,
+                sizeof(g_water_reflection_plane_view));
+    g_water_reflection_visible_side = 1.0f;
+    g_water_material_enabled = false;
+}
+
 /* F10 port-layer options overlay (port/src/optionsoverlay.c). Returns a
  * self-contained 2D display list to draw on top of the game's frame, or NULL
  * when the overlay is closed -- in which case nothing is appended and the
@@ -3994,18 +6167,33 @@ extern "C" void gfx_run(Gfx* commands) {
     }
     dropped_frame = false;
 
-    gfx_rapi->update_framebuffer_parameters(0, gfx_current_window_dimensions.width,
-                                            gfx_current_window_dimensions.height, 1, false, true, true,
-                                            !game_renders_to_framebuffer);
+    if (getenv("GE_DIAG_SKIP_DEFAULT_FB_UPDATE") == nullptr) {
+        gfx_rapi->update_framebuffer_parameters(0, gfx_current_window_dimensions.width,
+                                                gfx_current_window_dimensions.height, 1, false, true, true,
+                                                !game_renders_to_framebuffer);
+    }
     gfx_rapi->start_frame();
+    if (getenv("GE_MINIMAL_PRESENT") != nullptr) {
+        gfx_rapi->start_draw_to_framebuffer(0, 1);
+        if (getenv("GE_SKIP_PRESENT_CLEAR") == nullptr) {
+            gfx_rapi->clear_framebuffer(true, true);
+        }
+        gfx_rapi->end_frame();
+        gfx_wapi->swap_buffers_begin();
+        return;
+    }
     gfx_rapi->start_draw_to_framebuffer(game_renders_to_framebuffer ? game_framebuffer : 0,
                                         (float)gfx_current_dimensions.height / SCREEN_HEIGHT);
     gfx_rapi->clear_framebuffer(true, false);
     rdp.viewport_or_scissor_changed = true;
     rendering_state.viewport = {};
     rendering_state.scissor = {};
-    gfx_run_dl(commands);
-    {
+    if (getenv("GE_SKIP_RENDER") == nullptr &&
+        getenv("GE_SKIP_DL") == nullptr) {
+        gfx_run_dl(commands);
+    }
+    if (getenv("GE_SKIP_RENDER") == nullptr &&
+        getenv("GE_SKIP_DL") == nullptr) {
         Gfx* overlay = optionsOverlayEmit();
         if (overlay != nullptr) {
             gfx_run_dl(overlay);
@@ -4013,6 +6201,9 @@ extern "C" void gfx_run(Gfx* commands) {
     }
     gfx_flush();
     gfx_vector_text_draw();
+    if (ascensionPostFxWantsDepth() && gfx_rapi->capture_postfx_depth != nullptr) {
+        gfx_rapi->capture_postfx_depth();
+    }
     gfxFramebuffer = 0;
 
     if (game_renders_to_framebuffer) {

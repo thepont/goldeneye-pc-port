@@ -4,7 +4,11 @@
 
 void sets_a_bunch_of_BONDdata_values_to_default(void);
 #ifdef LEFTOVERDEBUG
+#ifdef PORT
+extern void exit(int);
+#else
 extern void exit(void);
+#endif
 #endif
 
 #endif

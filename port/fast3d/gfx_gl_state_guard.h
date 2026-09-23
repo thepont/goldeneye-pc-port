@@ -3,6 +3,30 @@
 
 #include "glad/glad.h"
 
+/* glDrawBuffer/GL_DRAW_BUFFER are desktop-only state queries in practice.
+ * GLES 3 uses the one-element glDrawBuffers form for both default and user
+ * framebuffers, and exposes the active value as GL_DRAW_BUFFER0. Keep this
+ * adapter shared by PostFX, vector text, and water-owned GL passes. */
+inline void geGlSetDrawBuffer(GLenum buffer)
+{
+    if (glDrawBuffers != nullptr) {
+        glDrawBuffers(1, &buffer);
+    } else if (glDrawBuffer != nullptr) {
+        glDrawBuffer(buffer);
+    }
+}
+
+inline GLint geGlGetDrawBuffer()
+{
+    GLint buffer = GL_NONE;
+    if (glDrawBuffers != nullptr) {
+        glGetIntegerv(GL_DRAW_BUFFER0, &buffer);
+    } else if (glDrawBuffer != nullptr) {
+        glGetIntegerv(GL_DRAW_BUFFER, &buffer);
+    }
+    return buffer;
+}
+
 /* RAII boundary for port-owned presentation/UI draws. Fast3D keeps several
  * bindings implicit between calls, so an auxiliary pass must restore the
  * complete state it touches before returning to the renderer. */
@@ -15,7 +39,7 @@ public:
         glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture_);
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer_);
         glGetIntegerv(GL_READ_BUFFER, &read_buffer_);
-        glGetIntegerv(GL_DRAW_BUFFER, &draw_buffer_);
+        draw_buffer_ = geGlGetDrawBuffer();
         glGetIntegerv(GL_VIEWPORT, viewport_);
         glGetIntegerv(GL_BLEND_SRC_RGB, &blend_src_rgb_);
         glGetIntegerv(GL_BLEND_DST_RGB, &blend_dst_rgb_);
@@ -29,7 +53,7 @@ public:
 
         framebuffer_supported_ = glBindFramebuffer != nullptr &&
                                  glReadBuffer != nullptr &&
-                                 glDrawBuffer != nullptr;
+                                 (glDrawBuffers != nullptr || glDrawBuffer != nullptr);
 
         const GLboolean old_depth = glIsEnabled(GL_DEPTH_TEST);
         const GLboolean old_blend = glIsEnabled(GL_BLEND);
@@ -42,6 +66,8 @@ public:
 
         glActiveTexture(GL_TEXTURE0);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture0_);
+        glActiveTexture(GL_TEXTURE1);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture1_);
         glActiveTexture((GLenum)active_texture_);
     }
 
@@ -53,7 +79,7 @@ public:
         if (framebuffer_supported_) {
             glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)framebuffer_);
             glReadBuffer((GLenum)read_buffer_);
-            glDrawBuffer((GLenum)draw_buffer_);
+            geGlSetDrawBuffer((GLenum)draw_buffer_);
         }
         glViewport(viewport_[0], viewport_[1], viewport_[2], viewport_[3]);
 
@@ -80,6 +106,8 @@ public:
         glBindBuffer(GL_ARRAY_BUFFER, (GLuint)array_buffer_);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, (GLuint)texture0_);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, (GLuint)texture1_);
         glActiveTexture((GLenum)active_texture_);
     }
 
@@ -89,6 +117,7 @@ private:
     GLint array_buffer_ = 0;
     GLint active_texture_ = GL_TEXTURE0;
     GLint texture0_ = 0;
+    GLint texture1_ = 0;
     GLint framebuffer_ = 0;
     GLint read_buffer_ = GL_BACK;
     GLint draw_buffer_ = GL_BACK;

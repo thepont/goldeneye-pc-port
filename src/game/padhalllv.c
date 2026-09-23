@@ -488,6 +488,11 @@ waypoint *waypointFindRandomByDist(s32 *pointnums, s32 dist)
 		len++;
 	}
 
+	if (len == 0)
+	{
+		return NULL;
+	}
+
 	// This is effectively randomly dividing the pointnums list into two,
 	// then checking the upper portion before the lower portion. Both loops
 	// have the same logic so this seems unusual, but there is reason to do
@@ -529,6 +534,11 @@ waygroup *waygroupFindRandomByDist(s32 *groupnums, s32 dist)
     while (groupnums[len] >= 0)
     {
         len++;
+    }
+
+    if (len == 0)
+    {
+        return NULL;
     }
 
     // Similar to the above function, return a random waygroup

@@ -14,7 +14,10 @@
  */ 
 struct GfxInfo_s {
     OSScTask task;
-    u32 cfb;
+    /* The N64 stored a physical address in 32 bits. The PC scheduler receives
+     * a host pointer, so truncating this field loses the framebuffer on a
+     * 64-bit build. */
+    uintptr_t cfb;
     u32 unk5C;
 };
 

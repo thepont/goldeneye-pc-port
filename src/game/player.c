@@ -7,8 +7,8 @@
 #include "bondview.h"
 #include "lv.h"
 
-struct player *g_playerPointers[4];
-struct player_data g_playerPlayerData[4];
+struct player *g_playerPointers[MAX_MULTIPLAYER];
+struct player_data g_playerPlayerData[MAX_MULTIPLAYER];
 
 /**
  * Address 0x8007a0b0.
@@ -18,7 +18,7 @@ struct player_data *g_playerPerm;
 
 s32 player_num;
 s32 random_byte;
-PLAYER_ID array_PLAYER_IDs[4];
+PLAYER_ID array_PLAYER_IDs[MAX_MULTIPLAYER];
 //s32 dword_CODE_bss_8007A0C4;
 //s32 dword_CODE_bss_8007A0C8;
 //s32 dword_CODE_bss_8007A0CC;
@@ -106,7 +106,7 @@ s32 getPlayerCount(void)
 {
     s32 count = 0;
     s32 i;
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < MAX_MULTIPLAYER; i++) {
         if (g_playerPointers[i] != NULL) {
             count++;
         }
@@ -518,8 +518,12 @@ s32 getPlayerPointerIndex(PropRecord* prop)
 {
     s32 i;
 
-    for(i = 0; i < getPlayerCount(); i++) {
-        if (g_playerPointers[i]->prop == prop) {
+    /* Slots are stable player ids, not a packed list. During co-op setup and
+     * teardown a later player can remain live while an earlier slot is empty;
+     * walking getPlayerCount() would both skip that player and dereference the
+     * empty slot. */
+    for (i = 0; i < MAX_MULTIPLAYER; i++) {
+        if ((g_playerPointers[i] != NULL) && (g_playerPointers[i]->prop == prop)) {
            return i;
         }
     }
@@ -639,15 +643,15 @@ void shuffle_player_ids(void) {
     u32 random;
     PLAYER_ID temp;
 
-    for (i = 0; i < 4; i ++) {
+    for (i = 0; i < MAX_MULTIPLAYER; i ++) {
         array_PLAYER_IDs[i] = i;
     }
 
-    for (i = 0; i < 3; i ++) {
+    for (i = 0; i < MAX_MULTIPLAYER - 1; i ++) {
         random = randomGetNext();
         temp = array_PLAYER_IDs[i];
-        array_PLAYER_IDs[i] = array_PLAYER_IDs[i + random % (4 - i)];
-        array_PLAYER_IDs[i + random % (4 - i)] = temp;
+        array_PLAYER_IDs[i] = array_PLAYER_IDs[i + random % (MAX_MULTIPLAYER - i)];
+        array_PLAYER_IDs[i + random % (MAX_MULTIPLAYER - i)] = temp;
     }
 }
 
@@ -655,7 +659,7 @@ s32 get_player_position_in_shuffled(s32 current_player_num) {
     s32 i;
     s32 position = 0;
 
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < MAX_MULTIPLAYER; i++) {
         if (current_player_num != array_PLAYER_IDs[i])
         {
             if (g_playerPointers[array_PLAYER_IDs[i]] != NULL)
@@ -676,7 +680,7 @@ s32 get_nth_player_from_shuffled(PLAYER_ID id)
 {
     s32 i;
 
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < MAX_MULTIPLAYER; i++) {
         if (g_playerPointers[array_PLAYER_IDs[i]] != NULL) {
             if (id == 0) {
                return array_PLAYER_IDs[i];

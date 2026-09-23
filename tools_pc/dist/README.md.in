@@ -21,7 +21,8 @@ This is the **@PLATFORM@** build. The executable is `@EXE@`.
 
 ## 1. You must supply your own ROM
 
-This package contains **no Nintendo code and no game data**. You need a
+This package contains **no Nintendo code and no game data**. It does include
+the OFL-licensed vector UI font used for readable briefings and HUD text. You need a
 *GoldenEye 007* Nintendo 64 ROM that **you legally own**, big-endian `.z64`,
 NTSC-U (US):
 
@@ -49,8 +50,9 @@ by their SHA-1 but not yet supported; they are on the roadmap.
 
 ## 3. Run
 
-Run `@EXE@` **from this folder**. Configuration is written to `ge007.ini` on
-first run.
+Run `@EXE@` from anywhere. Configuration is written to `ge007.ini` on first
+run, and the bundled vector UI font is resolved from the executable's `data/`
+directory even when the current working directory is unrelated.
 
 > If the game exits immediately reporting missing data, run the generator
 > manually from this folder (`prepare-assets/ge007-convert`; on Windows,

@@ -15,6 +15,14 @@ typedef struct GeWorldLightProfile {
     int priority;
 } GeWorldLightProfile;
 
+/* Enhanced water/material quality does not silently turn on port-owned world
+ * lights. The compatibility toggle is the sole authority for this optional
+ * lighting layer; authored Fast3D lights remain controlled by G_LIGHTING. */
+static inline int geWorldLightingEnabled(int toggle)
+{
+    return toggle != 0;
+}
+
 static inline float geWorldLightingClamp(float value, float minimum, float maximum)
 {
     if (value < minimum) {

@@ -61,6 +61,31 @@ static int expectedScaled(int value, int deadzone, int output_max)
 
 int main()
 {
+    if (geControllerApplyLookInvertY(37, 0) != 37 ||
+        geControllerApplyLookInvertY(-37, 0) != -37 ||
+        geControllerApplyLookInvertY(37, 1) != -37 ||
+        geControllerApplyLookInvertY(-37, 1) != 37 ||
+        geControllerApplyLookInvertY(0, 1) != 0) {
+        return fail("controller look inversion contract failed");
+    }
+
+    if (geControllerMenuModeMove(GE_CONTROLLER_MENU_MODE_SOLO, 1, 1, 1, 0) !=
+            GE_CONTROLLER_MENU_MODE_MULTI ||
+        geControllerMenuModeMove(GE_CONTROLLER_MENU_MODE_MULTI, 1, 1, 1, 0) !=
+            GE_CONTROLLER_MENU_MODE_COOP ||
+        geControllerMenuModeMove(GE_CONTROLLER_MENU_MODE_COOP, 1, 1, 1, 0) !=
+            GE_CONTROLLER_MENU_MODE_SOLO ||
+        geControllerMenuModeMove(GE_CONTROLLER_MENU_MODE_SOLO, -1, 1, 1, 0) !=
+            GE_CONTROLLER_MENU_MODE_COOP ||
+        geControllerMenuModeMove(GE_CONTROLLER_MENU_MODE_SOLO, 1, 0, 1, 0) !=
+            GE_CONTROLLER_MENU_MODE_COOP ||
+        geControllerMenuModeMove(GE_CONTROLLER_MENU_MODE_COOP, 1, 1, 1, 1) !=
+            GE_CONTROLLER_MENU_MODE_CHEATS ||
+        geControllerMenuModeMove(GE_CONTROLLER_MENU_MODE_CHEATS, 1, 1, 1, 1) !=
+            GE_CONTROLLER_MENU_MODE_SOLO) {
+        return fail("controller mode-menu navigation contract failed");
+    }
+
     unsigned cases = 0;
     for (unsigned bits = 0; bits < (1u << 13); ++bits)
     {

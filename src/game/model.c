@@ -6172,9 +6172,18 @@ void modelResetAnimationsScratchBuffer(void)
 }
 
 
+#ifdef PORT
+/* PC model sidecars store 0x05xxxxxx VMAs in pointer-sized fields.  The
+ * relocation delta is host-sized because the loaded sidecar may live above
+ * 4 GiB; narrowing either operand recreates the D43 crash on 64-bit hosts. */
+#define PROMOTE(var) \
+    if (var) \
+        var = (void *)((uintptr_t)(var) + (intptr_t)diff)
+#else
 #define PROMOTE(var) \
     if (var) \
         var = (void *)((u32)var + diff)
+#endif
 
 #ifdef PORT
 /* PC port (D43/D45): Vertex.LinkedTo is a raw vma (u32), not a pointer —
@@ -6184,9 +6193,18 @@ void modelResetAnimationsScratchBuffer(void)
         var = (u32)((u32)var + diff)
 #endif
 
+#ifdef PORT
+void modelPromoteNodeOffsetsToPointers(ModelNode *node, u32 vma,
+                                       uintptr_t fileramaddr)
+#else
 void modelPromoteNodeOffsetsToPointers(ModelNode *node, u32 vma, u32 fileramaddr)
+#endif
 {
+#ifdef PORT
+    intptr_t diff = (intptr_t)fileramaddr - (intptr_t)vma;
+#else
     s32 diff = fileramaddr - vma;
+#endif
     s32 i;
 
     while (node)
@@ -6388,8 +6406,13 @@ void modelPromoteNodeOffsetsToPointers(ModelNode *node, u32 vma, u32 fileramaddr
 /**
  * Address 7F075A90.
 */
+#ifdef PORT
+void sub_GAME_7F075A90(ModelFileHeader *header, s32 vma, uintptr_t addr) {
+    intptr_t diff = (intptr_t)addr - (intptr_t)vma;
+#else
 void sub_GAME_7F075A90(ModelFileHeader *header, s32 vma, u32 addr) {
     s32 diff = addr - vma;
+#endif
     s32 i;
 
     for(i = 0;i < header->numSwitches;i++)

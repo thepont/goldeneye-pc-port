@@ -5,6 +5,11 @@
 #include "ob.h"
 
 #ifdef PORT
+/* The converted PC build stores legacy bank pointers in s32 slots. These
+ * bounds reject sign-extended/N64-width garbage before the table is read. */
+#define LANG_BANK_MIN_PLAUSIBLE_ADDRESS ((uintptr_t)0x10000)
+#define LANG_BANK_MAX_PLAUSIBLE_ADDRESS ((uintptr_t)0x400000000ULL)
+
 /* D50: language banks carry a big-endian offset table; decode it in place
  * after each load (see romdataFixupLangBank). */
 #include "romdata.h"
@@ -20,7 +25,7 @@ static void langFixupLoadedBank(char *name, void *p)
 
 // bss
 //CODE.bss:8008C640
-s32 g_LangBanks[45];
+s32 g_LangBanks[LANGUAGE_BANK_COUNT];
 
 
 //CODE.bss:8008C6F4
@@ -41,7 +46,7 @@ s32 j_text_trigger = 0;
 
 #if defined(LANG_US) || defined(LANG_JP)
 
-void *LnameX_lookuptable[45][2] = {
+void *LnameX_lookuptable[LANGUAGE_BANK_COUNT][2] = {
     {NULL, NULL},                    /* Null (unused) */
     {"LameE", "LameJ"},              /* Library (multi) */
     {"LarchE", "LarchJ"},            /* Archives */
@@ -91,7 +96,7 @@ void *LnameX_lookuptable[45][2] = {
 #endif
 
 #if defined(LANG_EU)
-void *LnameX_lookuptable[45][2] = {
+void *LnameX_lookuptable[LANGUAGE_BANK_COUNT][2] = {
     {NULL, NULL},                    /* Null (unused) */
     {"LameP", "LameJ"},              /* Library (multi) */
     {"LarchP", "LarchJ"},            /* Archives */
@@ -245,24 +250,24 @@ void langInit(void) {
     s32 i;
 
     if (j_text_trigger) {
-        g_JpnCharCachePixels = mempAllocBytesInBank(0x2E80, MEMPOOL_PERMANENT);
-        g_JpnCacheCacheItems = mempAllocBytesInBank(0x100, MEMPOOL_PERMANENT);
-        for(i = 0;i != 124;i++) {
+        g_JpnCharCachePixels = mempAllocBytesInBank(JPN_CACHE_PIXEL_BYTES, MEMPOOL_PERMANENT);
+        g_JpnCacheCacheItems = mempAllocBytesInBank(JPN_CACHE_ITEM_STORAGE_BYTES, MEMPOOL_PERMANENT);
+        for(i = 0;i != JPN_CACHE_ENTRY_COUNT;i++) {
             g_JpnCacheCacheItems[i].ttl =0;
             g_JpnCacheCacheItems[i].codepoint =-1;
         }
     }
 
-	for (i = 0; i < 45; i++) {
+	for (i = 0; i < LANGUAGE_BANK_COUNT; i++) {
 		g_LangBanks[i] = 0;
 	}
-    g_LangBanks[LGUN] = _fileNameLoadToBank(LnameX_lookuptable[LGUN][j_text_trigger], FILELOADMETHOD_DEFAULT, 0x100, MEMPOOL_PERMANENT);
-    g_LangBanks[LTITLE] = _fileNameLoadToBank(LnameX_lookuptable[LTITLE][j_text_trigger], FILELOADMETHOD_DEFAULT, 0x100, MEMPOOL_PERMANENT);
-    g_LangBanks[LMPMENU] = _fileNameLoadToBank(LnameX_lookuptable[LMPMENU][j_text_trigger], FILELOADMETHOD_DEFAULT, 0x100, MEMPOOL_PERMANENT);
-    g_LangBanks[LPROPOBJ] = _fileNameLoadToBank(LnameX_lookuptable[LPROPOBJ][j_text_trigger], FILELOADMETHOD_DEFAULT, 0x100, MEMPOOL_PERMANENT);
-    g_LangBanks[LMPWEAPONS] = _fileNameLoadToBank(LnameX_lookuptable[LMPWEAPONS][j_text_trigger], FILELOADMETHOD_DEFAULT, 0x100, MEMPOOL_PERMANENT);
-    g_LangBanks[LOPTIONS] = _fileNameLoadToBank(LnameX_lookuptable[LOPTIONS][j_text_trigger], FILELOADMETHOD_DEFAULT, 0x100, MEMPOOL_PERMANENT);
-    g_LangBanks[LMISC] = _fileNameLoadToBank(LnameX_lookuptable[LMISC][j_text_trigger], FILELOADMETHOD_DEFAULT, 0x100, MEMPOOL_PERMANENT);
+    g_LangBanks[LGUN] = _fileNameLoadToBank(LnameX_lookuptable[LGUN][j_text_trigger], FILELOADMETHOD_DEFAULT, LANG_BANK_LOAD_SIZE_HINT, MEMPOOL_PERMANENT);
+    g_LangBanks[LTITLE] = _fileNameLoadToBank(LnameX_lookuptable[LTITLE][j_text_trigger], FILELOADMETHOD_DEFAULT, LANG_BANK_LOAD_SIZE_HINT, MEMPOOL_PERMANENT);
+    g_LangBanks[LMPMENU] = _fileNameLoadToBank(LnameX_lookuptable[LMPMENU][j_text_trigger], FILELOADMETHOD_DEFAULT, LANG_BANK_LOAD_SIZE_HINT, MEMPOOL_PERMANENT);
+    g_LangBanks[LPROPOBJ] = _fileNameLoadToBank(LnameX_lookuptable[LPROPOBJ][j_text_trigger], FILELOADMETHOD_DEFAULT, LANG_BANK_LOAD_SIZE_HINT, MEMPOOL_PERMANENT);
+    g_LangBanks[LMPWEAPONS] = _fileNameLoadToBank(LnameX_lookuptable[LMPWEAPONS][j_text_trigger], FILELOADMETHOD_DEFAULT, LANG_BANK_LOAD_SIZE_HINT, MEMPOOL_PERMANENT);
+    g_LangBanks[LOPTIONS] = _fileNameLoadToBank(LnameX_lookuptable[LOPTIONS][j_text_trigger], FILELOADMETHOD_DEFAULT, LANG_BANK_LOAD_SIZE_HINT, MEMPOOL_PERMANENT);
+    g_LangBanks[LMISC] = _fileNameLoadToBank(LnameX_lookuptable[LMISC][j_text_trigger], FILELOADMETHOD_DEFAULT, LANG_BANK_LOAD_SIZE_HINT, MEMPOOL_PERMANENT);
 #ifdef PORT
     langFixupLoadedBank(LnameX_lookuptable[LGUN][j_text_trigger], (void *)g_LangBanks[LGUN]);
     langFixupLoadedBank(LnameX_lookuptable[LTITLE][j_text_trigger], (void *)g_LangBanks[LTITLE]);
@@ -282,7 +287,7 @@ void langTick(void)
 
     if (j_text_trigger)
     {
-        for (i = 0; i < 0x7c; i++)
+        for (i = 0; i < JPN_CACHE_ENTRY_COUNT; i++)
         {
 		    if (g_JpnCacheCacheItems[i].ttl)
             {
@@ -308,22 +313,18 @@ struct jpncharpixels *langGetJpnCharPixels(s32 codepoint)
 	s32 multibyte = 0;
 
 
-	if (codepoint & 0x2000) {
+	if (codepoint & JPN_MULTIBYTE_FLAG) {
 		multibyte = 1;
 	}
 
-
-#define SHIFTAMOUNT 1
-#define TMUL 8
-
-	for (i = 0; i < 0x7C; i++) {
-		if (!multibyte && (codepoint >> SHIFTAMOUNT) == g_JpnCacheCacheItems[i].codepoint) {
+	for (i = 0; i < JPN_CACHE_ENTRY_COUNT; i++) {
+		if (!multibyte && (codepoint >> JPN_CODEPOINT_SHIFT) == g_JpnCacheCacheItems[i].codepoint) {
 			break;
 		}
 
-		if (multibyte && i + 1 < 0x7C
-				&& (codepoint >> SHIFTAMOUNT) == g_JpnCacheCacheItems[i].codepoint
-				&& (codepoint >> SHIFTAMOUNT) == g_JpnCacheCacheItems[i + 1].codepoint) {
+		if (multibyte && i + 1 < JPN_CACHE_ENTRY_COUNT
+				&& (codepoint >> JPN_CODEPOINT_SHIFT) == g_JpnCacheCacheItems[i].codepoint
+				&& (codepoint >> JPN_CODEPOINT_SHIFT) == g_JpnCacheCacheItems[i + 1].codepoint) {
 			break;
 		}
 
@@ -331,43 +332,43 @@ struct jpncharpixels *langGetJpnCharPixels(s32 codepoint)
 			freeindexsingle = i;
 		}
 
-		if (g_JpnCacheCacheItems[i].ttl == 0 && g_JpnCacheCacheItems[i + 1].ttl == 0 && i + 1 < 0x7C) {
+		if (i + 1 < JPN_CACHE_ENTRY_COUNT && g_JpnCacheCacheItems[i].ttl == 0 && g_JpnCacheCacheItems[i + 1].ttl == 0) {
 			freeindexmulti = i;
 		}
 	}
 
-	if (i < 0x7C) {
+	if (i < JPN_CACHE_ENTRY_COUNT) {
 		if (!multibyte) {
 			g_JpnCacheCacheItems[i].ttl = 2;
 
-			return &g_JpnCharCachePixels[i * TMUL];
+			return &g_JpnCharCachePixels[i * JPN_CACHE_PIXEL_STRIDE];
 		} else {
 			g_JpnCacheCacheItems[i + 0].ttl = 2;
 			g_JpnCacheCacheItems[i + 1].ttl = 2;
 
-			return &g_JpnCharCachePixels[TMUL * i];
+			return &g_JpnCharCachePixels[JPN_CACHE_PIXEL_STRIDE * i];
 		}
 	}
 
 
 	if (!multibyte && freeindexsingle >= 0) {
 		g_JpnCacheCacheItems[freeindexsingle].ttl = 2;
-		g_JpnCacheCacheItems[freeindexsingle].codepoint = codepoint >> 1;
+		g_JpnCacheCacheItems[freeindexsingle].codepoint = codepoint >> JPN_CODEPOINT_SHIFT;
 
-		romCopy(&g_JpnCharCachePixels[freeindexsingle * 8], (romptr_t) &_jfontchardataSegmentRomStart + (codepoint >> SHIFTAMOUNT) * 0x60, 0x60);
+		romCopy(&g_JpnCharCachePixels[freeindexsingle * JPN_CACHE_PIXEL_STRIDE], (romptr_t) &_jfontchardataSegmentRomStart + (codepoint >> JPN_CODEPOINT_SHIFT) * JPN_SINGLE_GLYPH_ROM_BYTES, JPN_SINGLE_GLYPH_ROM_BYTES);
 
-		return &g_JpnCharCachePixels[freeindexsingle * 8];
+		return &g_JpnCharCachePixels[freeindexsingle * JPN_CACHE_PIXEL_STRIDE];
 	}
 
 	if (multibyte && freeindexmulti >= 0) {
 		g_JpnCacheCacheItems[freeindexmulti + 0].ttl = 2;
 		g_JpnCacheCacheItems[freeindexmulti + 1].ttl = 2;
-		g_JpnCacheCacheItems[freeindexmulti + 0].codepoint = codepoint >> 1;
-		g_JpnCacheCacheItems[freeindexmulti + 1].codepoint = codepoint >> 1;
+		g_JpnCacheCacheItems[freeindexmulti + 0].codepoint = codepoint >> JPN_CODEPOINT_SHIFT;
+		g_JpnCacheCacheItems[freeindexmulti + 1].codepoint = codepoint >> JPN_CODEPOINT_SHIFT;
 
-		romCopy(&g_JpnCharCachePixels[freeindexmulti * 8], (romptr_t) &_efontchardataSegmentRomStart + ((codepoint & 0x1fff) >> SHIFTAMOUNT) * 0x80, 0x80);
+		romCopy(&g_JpnCharCachePixels[freeindexmulti * JPN_CACHE_PIXEL_STRIDE], (romptr_t) &_efontchardataSegmentRomStart + ((codepoint & JPN_MULTIBYTE_CODEPOINT_MASK) >> JPN_CODEPOINT_SHIFT) * JPN_MULTIBYTE_GLYPH_ROM_BYTES, JPN_MULTIBYTE_GLYPH_ROM_BYTES);
 
-		return &g_JpnCharCachePixels[freeindexmulti * 8];
+		return &g_JpnCharCachePixels[freeindexmulti * JPN_CACHE_PIXEL_STRIDE];
 	}
 
 	return &g_JpnCharCachePixels[0];
@@ -376,7 +377,7 @@ struct jpncharpixels *langGetJpnCharPixels(s32 codepoint)
 
 void langLoadToAddr(u32 id)
 {
-    g_LangBanks[id] = _fileNameLoadToBank(LnameX_lookuptable[id][j_text_trigger],1,0x100,MEMPOOL_STAGE);
+    g_LangBanks[id] = _fileNameLoadToBank(LnameX_lookuptable[id][j_text_trigger], FILELOADMETHOD_DEFAULT, LANG_BANK_LOAD_SIZE_HINT, MEMPOOL_STAGE);
 #ifdef PORT
     langFixupLoadedBank(LnameX_lookuptable[id][j_text_trigger], (void *)g_LangBanks[id]);
 #endif
@@ -385,7 +386,7 @@ void langLoadToAddr(u32 id)
 
 void langLoadToBank(int id,u8 *target,int size)
 {
-    g_LangBanks[id] = _fileNameLoadToAddr(LnameX_lookuptable[id][j_text_trigger],1,target,size);
+    g_LangBanks[id] = _fileNameLoadToAddr(LnameX_lookuptable[id][j_text_trigger], FILELOADMETHOD_DEFAULT, target, size);
 #ifdef PORT
     langFixupLoadedBank(LnameX_lookuptable[id][j_text_trigger], (void *)g_LangBanks[id]);
 #endif
@@ -404,17 +405,19 @@ void langClearBank(s32 textBank) {
 u8 * langGet(s32 slotID)
 {
 #ifdef PORT
-    /* D129: guard an out-of-range language slot id. `slotID >> 10` indexes
-     * g_LangBanks[45]; a bogus/uninitialised id (seen as 0xFFFFFFFF from the
+    /* D129: guard an out-of-range language slot id. The bank field indexes
+     * g_LangBanks[LANGUAGE_BANK_COUNT]; a bogus/uninitialised id (seen as
+     * 0xFFFFFFFF from the
      * cast/credits text path on Cuba -level_54, bondviewRenderCredits ->
      * D76 area) indexes wildly OOB -> fault. langGet already returns NULL for
      * a missing string, so treat an impossible bank index the same way
      * instead of crashing the level. */
-    if ((u32)slotID >= (45u << 10)) {
+    if ((u32)slotID >= (LANGUAGE_BANK_COUNT << LANGUAGE_TEXT_SLOT_SHIFT)) {
         return NULL;
     }
 #endif
-    u32 * textbank_ptr = g_LangBanks[slotID >> 10]; /* get the text file bank ID index the text ptr table */
+    u32 * textbank_ptr = g_LangBanks[slotID >> LANGUAGE_TEXT_SLOT_SHIFT];
+    /* get the text file bank ID index for the text pointer table */
 #ifdef PORT
     /* D129 cont.: g_LangBanks[] is s32 and only populated for banks the
      * current flow has loaded.  A bare `-level_XX` boot that reaches the
@@ -422,7 +425,8 @@ u8 * langGet(s32 slotID)
      * slot that was never filled -> stale/garbage non-NULL value -> fault on
      * the table read below.  Reject anything that is not a plausible mapped
      * DRAM address. */
-    if ((uintptr_t)textbank_ptr < 0x10000 || (uintptr_t)textbank_ptr >= 0x400000000ULL) {
+    if ((uintptr_t)textbank_ptr < LANG_BANK_MIN_PLAUSIBLE_ADDRESS ||
+            (uintptr_t)textbank_ptr >= LANG_BANK_MAX_PLAUSIBLE_ADDRESS) {
         return NULL;
     }
 #endif
@@ -432,15 +436,16 @@ u8 * langGet(s32 slotID)
         static int d65first = 1;
         if (d65first) {
             d65first = 0;
-            for (int b = 0; b < 45; b++)
+            for (int b = 0; b < LANGUAGE_BANK_COUNT; b++)
                 if (g_LangBanks[b])
                     osSyncPrintf("D65 bank %d = %p\n", b, (void *)g_LangBanks[b]);
         }
         if (!textbank_ptr)
-            osSyncPrintf("D65 langGet slotID=0x%08x bank=%d ptr=NULL\n", (unsigned)slotID, slotID >> 10);
+            osSyncPrintf("D65 langGet slotID=0x%08x bank=%d ptr=NULL\n", (unsigned)slotID, slotID >> LANGUAGE_TEXT_SLOT_SHIFT);
     }
 #endif
-    u32 textslot_offset = textbank_ptr[slotID & 0x03FF]; /* load the textbank ptr table then get the slot's offset */
+    u32 textslot_offset = textbank_ptr[slotID & LANGUAGE_TEXT_SLOT_MASK];
+    /* load the textbank pointer table, then get the slot's offset */
 
     u32 output_slot = textslot_offset; /* add the text slot offset to the base ptr to get the ptr to text file's slot */
     output_slot += (u32)textbank_ptr;

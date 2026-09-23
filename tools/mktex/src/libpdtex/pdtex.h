@@ -43,10 +43,14 @@ struct pd_image {
 };
 
 struct pd_tex {
-	uint8_t *palette;
-	int numcolours;
-	struct pd_image images[PDTEX_MAX_IMAGES];
+    uint8_t *palette;
+    int numcolours;
+    struct pd_image images[PDTEX_MAX_IMAGES];
 };
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct pd_tex *pdtex_allocate(void);
 
@@ -54,8 +58,17 @@ void pdtex_free(struct pd_tex *tex);
 
 int pdtex_read(struct pd_tex *tex, char *filename);
 
+/* Read one ROM texture from an already-open binary stream. The stream may be
+ * a temporary file, which lets offline tools reuse the decoder without
+ * materializing 2698 permanent extracted files. */
+int pdtex_read_stream(struct pd_tex *tex, FILE *fp);
+
 int pdtex_write(struct pd_image *image, char *filename);
 
 void pdtex_print(struct pd_tex *tex);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

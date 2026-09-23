@@ -9619,9 +9619,14 @@ void record_damage_kills(f32 damage_amount, f32 vectorx, f32 vectorz, s32 player
 
                     if (angle < 90.0f || angle > 270.0f)
                     {
-                        // danger: if Bond could be damaged by toxic gas in multiplayer, playerid would be -1
-                        // thus causing an out of bounds access
-                        g_playerPlayerData[playerid].damage_to_backside++;
+                        /* Environmental damage has no killer player and uses
+                         * -1 as its attribution sentinel. It still damages
+                         * Bond, but it cannot contribute to a player's
+                         * backside statistic. */
+                        if (playerid >= 0 && playerid < getPlayerCount())
+                        {
+                            g_playerPlayerData[playerid].damage_to_backside++;
+                        }
                     }
                 }
 
@@ -9663,27 +9668,32 @@ void record_damage_kills(f32 damage_amount, f32 vectorx, f32 vectorz, s32 player
                                 increment_num_deaths();
                             }
 
-                            set_cur_player(playerid);
-
-                            if (sp2C == playerid)
+                            /* -1 (and any other out-of-range value) means
+                             * environmental/AI damage. Preserve the death
+                             * bookkeeping above, but never use that sentinel
+                             * as a player-array index or switch the current
+                             * player to it. */
+                            if (playerid >= 0 && playerid < getPlayerCount())
                             {
-                                increment_num_suicides_display_MP();
-                            }
-                            else
-                            {
-                                increment_num_kills_display_text_in_MP();
+                                set_cur_player(playerid);
 
-                                if (sp28 != 0)
+                                if (sp2C == playerid)
                                 {
-                                    increment_num_times_killed_MwtGC();
+                                    increment_num_suicides_display_MP();
                                 }
+                                else
+                                {
+                                    increment_num_kills_display_text_in_MP();
+
+                                    if (sp28 != 0)
+                                    {
+                                        increment_num_times_killed_MwtGC();
+                                    }
+                                }
+
+                                set_cur_player(sp2C);
+                                g_playerPlayerData[playerid].kill_counts[sp2C]++;
                             }
-
-                            set_cur_player(sp2C);
-
-                            if(1);
-
-                            g_playerPlayerData[playerid].kill_counts[sp2C]++;
                         }
 
                         bondviewKillCurrentPlayer();

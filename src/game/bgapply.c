@@ -97,7 +97,9 @@ void bgApplyDynamicCCRMLUT(Gfx *start, Gfx *end, enum CCRMLUT lutIndex)
 #endif
 
     /* Loop until end pointer or sentinel G_ENDDL (when end==NULL) */
-    while (((end != NULL) && (curGfx < end)) || ((end == NULL) && (((s8*)curGfx)[0] != (s8)G_ENDDL)))
+    while (((end != NULL) && (curGfx < end)) ||
+           ((end == NULL) &&
+            ((u8)(curGfx->words.w0 >> 24) != (u8)G_ENDDL)))
     {
         for (lutPair = ptrDynamic_CC_RM_LUT[(s32)lutIndex]; lutPair->words.w0 != 0; lutPair += 2)
         {

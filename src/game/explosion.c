@@ -15,6 +15,7 @@
 #include "explosion.h"
 #include "fr.h"
 #include "image_bank.h"
+#include "math_atan2f.h"
 #include "othermodemicrocode.h"
 #include "lv.h"
 #include "matrixmath.h"
@@ -25,6 +26,11 @@
 #include "stan.h"
 #include "bgroomtrans.h"
 #include <assets/oddtextures.h>
+
+#ifdef PORT
+#include "../../port/fast3d/explosion_effect_policy.h"
+#include "../../port/fast3d/gfx_api.h"
+#endif
 
 // bss
 //CODE.bss:8007A100
@@ -920,6 +926,104 @@ Gfx *explosionRenderPropExplosion(PropRecord *prop, Gfx *gdl, s32 withalpha)
 }
 
 
+#ifdef PORT
+/*
+ * Emit one additional oblique card for the PC presentation path. The original
+ * game-side billboard remains the authoritative compatibility draw; this
+ * helper owns the extra-card geometry so fire and smoke cannot drift into two
+ * subtly different implementations.
+ */
+static Gfx *explosionRenderPortLayeredQuad(
+    Gfx *gdl,
+    const Vtx *default_vertex,
+    Mtxf *view_to_world,
+    f32 center_x,
+    f32 center_y,
+    f32 center_z,
+    struct coord3d *room_origin,
+    f32 half_size,
+    f32 coordinate_scale,
+    f32 in_plane_rotation,
+    const GeExplosionPresentationLayer *layer,
+    u8 red,
+    u8 green,
+    u8 blue,
+    u8 alpha)
+{
+    Vtx *vertices = dynAllocateVertices(4);
+    f32 right[3];
+    f32 up[3];
+    f32 rotated_right[3];
+    f32 rotated_up[3];
+    f32 corners[4][3];
+    f32 layer_size = half_size * layer->scale;
+    f32 yaw_cos = cosf(layer->yaw);
+    f32 yaw_sin = sinf(layer->yaw);
+    f32 pitch_cos = cosf(layer->pitch);
+    f32 pitch_sin = sinf(layer->pitch);
+    f32 rotation_cos = cosf(in_plane_rotation);
+    f32 rotation_sin = sinf(in_plane_rotation);
+    f32 room_scale = get_room_data_float1();
+    int i;
+
+    /* Tilt the card's right/up axes toward the camera-forward axis. */
+    for (i = 0; i < 3; i++) {
+        right[i] = view_to_world->m[0][i] * yaw_cos
+                 + view_to_world->m[2][i] * yaw_sin;
+        up[i] = view_to_world->m[1][i] * pitch_cos
+              + view_to_world->m[2][i] * pitch_sin;
+        rotated_right[i] = (right[i] * rotation_cos
+                          + up[i] * rotation_sin) * layer_size;
+        rotated_up[i] = (-right[i] * rotation_sin
+                       + up[i] * rotation_cos) * layer_size;
+    }
+
+    corners[0][0] = center_x - rotated_right[0] - rotated_up[0];
+    corners[0][1] = center_y - rotated_right[1] - rotated_up[1];
+    corners[0][2] = center_z - rotated_right[2] - rotated_up[2];
+    corners[1][0] = center_x + rotated_right[0] - rotated_up[0];
+    corners[1][1] = center_y + rotated_right[1] - rotated_up[1];
+    corners[1][2] = center_z + rotated_right[2] - rotated_up[2];
+    corners[2][0] = center_x + rotated_right[0] + rotated_up[0];
+    corners[2][1] = center_y + rotated_right[1] + rotated_up[1];
+    corners[2][2] = center_z + rotated_right[2] + rotated_up[2];
+    corners[3][0] = center_x - rotated_right[0] + rotated_up[0];
+    corners[3][1] = center_y - rotated_right[1] + rotated_up[1];
+    corners[3][2] = center_z - rotated_right[2] + rotated_up[2];
+
+    for (i = 0; i < 4; i++) {
+        vertices[i] = *default_vertex;
+        vertices[i].v.ob[0] = corners[i][0] * room_scale
+                            - room_origin->f[0];
+        vertices[i].v.ob[1] = corners[i][1] * room_scale
+                            - room_origin->f[1];
+        vertices[i].v.ob[2] = corners[i][2] * room_scale
+                            - room_origin->f[2];
+        vertices[i].v.ob[0] *= coordinate_scale;
+        vertices[i].v.ob[1] *= coordinate_scale;
+        vertices[i].v.ob[2] *= coordinate_scale;
+        vertices[i].v.cn[0] = red;
+        vertices[i].v.cn[1] = green;
+        vertices[i].v.cn[2] = blue;
+        vertices[i].v.cn[3] = alpha;
+    }
+
+    vertices[0].v.tc[0] = 1760;
+    vertices[0].v.tc[1] = 0;
+    vertices[1].v.tc[0] = 0;
+    vertices[1].v.tc[1] = 0;
+    vertices[2].v.tc[0] = 0;
+    vertices[2].v.tc[1] = 1760;
+    vertices[3].v.tc[0] = 1760;
+    vertices[3].v.tc[1] = 1760;
+
+    gSPVertex(gdl++, osVirtualToPhysical(vertices), 4, 0);
+    gSP2Triangles(gdl++, 0, 1, 2, 0, 0, 2, 3, 0);
+
+    return gdl;
+}
+#endif
+
 
 /***
  * Perfect Dark Gfx *explosionRenderPart(struct explosion *exp, struct explosionpart *part, Gfx *gdl, struct coord *coord, s32 arg4)
@@ -1049,6 +1153,37 @@ Gfx *explosionRenderPart(struct ExplosionPart *arg0, Gfx *gdl, struct coord3d *c
     gSPVertex(gdl++, osVirtualToPhysical(vertices), 4, 0);
 
 	gSP2Triangles(gdl++, 0, 1, 2, 0, 0, 2, 3, 0);
+
+#ifdef PORT
+    if (gfx_get_render_mode() >= GFX_RENDER_ENHANCED) {
+        const int extra_layers =
+            geExplosionPresentationExtraLayerCount(gfx_get_render_mode());
+        const f32 base_size = sqrtf((sp54 * sp54) + (sp50 * sp50));
+        const f32 in_plane_rotation = atan2f(sp50, sp54);
+        int layer_index;
+
+        for (layer_index = 0; layer_index < extra_layers; layer_index++) {
+            const GeExplosionPresentationLayer layer =
+                geExplosionPresentationExtraLayer(layer_index);
+            gdl = explosionRenderPortLayeredQuad(
+                gdl,
+                &spA0,
+                sp9C,
+                sp4c,
+                sp48,
+                sp44,
+                coord,
+                base_size,
+                1.0f,
+                in_plane_rotation,
+                &layer,
+                255,
+                255,
+                255,
+                layer.alpha);
+        }
+    }
+#endif
 
 	return gdl;
 }
@@ -1214,6 +1349,43 @@ Gfx *explosionSmokeRenderPart(struct Smoke *smoke, struct SmokePart *smoke_part,
     gSPVertex(gdl++, osVirtualToPhysical(vertices), 4, 0);
 
 	gSP2Triangles(gdl++, 0, 1, 2, 0, 0, 2, 3, 0);
+
+#ifdef PORT
+    if (gfx_get_render_mode() >= GFX_RENDER_ENHANCED) {
+        const int extra_layers =
+            geExplosionPresentationExtraLayerCount(gfx_get_render_mode());
+        const f32 base_size = sqrtf((sp88 * sp88) + (sp84 * sp84));
+        const f32 in_plane_rotation = atan2f(sp84, sp88);
+        const u8 red = g_SmokeTypes[smoke->smoke_type].r;
+        const u8 green = g_SmokeTypes[smoke->smoke_type].g;
+        const u8 blue = g_SmokeTypes[smoke->smoke_type].b;
+        int layer_index;
+
+        for (layer_index = 0; layer_index < extra_layers; layer_index++) {
+            const GeExplosionPresentationLayer layer =
+                geExplosionPresentationExtraLayer(layer_index);
+            const u8 layer_alpha =
+                (u8)(((unsigned int)sp77 * (unsigned int)layer.alpha + 127u)
+                     / 255u);
+            gdl = explosionRenderPortLayeredQuad(
+                gdl,
+                &spC0,
+                mtx,
+                sp80,
+                sp7C,
+                sp78,
+                arg3,
+                base_size,
+                10.0f,
+                in_plane_rotation,
+                &layer,
+                red,
+                green,
+                blue,
+                layer_alpha);
+        }
+    }
+#endif
 
 	return gdl;
 }
@@ -2311,5 +2483,3 @@ Gfx * explosionCallRenderBulletImpactOnProp(Gfx *arg0)
 {
     return explosionRenderBulletImpactOnProp(arg0, NULL, 0);
 }
-
-

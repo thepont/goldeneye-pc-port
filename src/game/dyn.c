@@ -28,14 +28,24 @@
  * marker for the end of the second element's allocation.
  */
 
-u8 *g_GfxBuffers[3];
-u8 *g_VtxBuffers[3];
+u8 *g_GfxBuffers[DYN_BUFFER_SLOT_COUNT];
+u8 *g_VtxBuffers[DYN_BUFFER_SLOT_COUNT];
 u8 *g_GfxMemPos;
 u8 g_GfxActiveBufferIndex;
 s32 g_GfxRequestedDisplayList;
 s32 D_800482E0 = 0;
-s32 g_GfxSizesByPlayerCount[] = {0x10000, 0x18000, 0x20000, 0x28000};
-s32 g_VtxSizesByPlayerCount[] = {0x10000, 0x18000, 0x20000, 0x28000};
+s32 g_GfxSizesByPlayerCount[DYN_PLAYER_COUNT_BUCKETS] = {
+    DYN_DEFAULT_BUFFER_BYTES_1P,
+    DYN_DEFAULT_BUFFER_BYTES_2P,
+    DYN_DEFAULT_BUFFER_BYTES_3P,
+    DYN_DEFAULT_BUFFER_BYTES_4P
+};
+s32 g_VtxSizesByPlayerCount[DYN_PLAYER_COUNT_BUCKETS] = {
+    DYN_DEFAULT_BUFFER_BYTES_1P,
+    DYN_DEFAULT_BUFFER_BYTES_2P,
+    DYN_DEFAULT_BUFFER_BYTES_3P,
+    DYN_DEFAULT_BUFFER_BYTES_4P
+};
 
 char membars_string1[] = ">>>>>>>>>>>>>>>>>>>>>>>>>";
 char membars_string2[] = "=========================";
@@ -47,10 +57,10 @@ void dynInit(void) {
 
 void dynInitMemory(void) {
     if (tokenFind(1, "-mgfx")) {
-        g_GfxSizesByPlayerCount[getPlayerCount() - 1] = strtol(tokenFind(1, "-mgfx"), NULL, 0) * 1024;
+        g_GfxSizesByPlayerCount[getPlayerCount() - 1] = strtol(tokenFind(1, "-mgfx"), NULL, 0) * DYN_BYTES_PER_KIBIBYTE;
     }
     if (tokenFind(1, "-mvtx")) {
-        g_VtxSizesByPlayerCount[getPlayerCount() - 1] = strtol(tokenFind(1, "-mvtx"), NULL, 0) * 1024;
+        g_VtxSizesByPlayerCount[getPlayerCount() - 1] = strtol(tokenFind(1, "-mvtx"), NULL, 0) * DYN_BYTES_PER_KIBIBYTE;
     }
 
 #ifdef PORT
@@ -63,18 +73,18 @@ void dynInitMemory(void) {
      * GBI command. Scale by sizeof(Gfx)/8. Vtx/Mtx are 16/64 bytes on both
      * targets, so g_VtxBuffers is left alone. */
     {
-        s32 gfxHalf = g_GfxSizesByPlayerCount[getPlayerCount() - 1] * ((s32)sizeof(Gfx) / 8);
-        g_GfxBuffers[0] = mempAllocBytesInBank(gfxHalf * 2, MEMPOOL_STAGE);
+        s32 gfxHalf = g_GfxSizesByPlayerCount[getPlayerCount() - 1] * ((s32)sizeof(Gfx) / DYN_N64_GFX_COMMAND_BYTES);
+        g_GfxBuffers[0] = mempAllocBytesInBank(gfxHalf * DYN_DOUBLE_BUFFER_COUNT, MEMPOOL_STAGE);
         g_GfxBuffers[1] = (g_GfxBuffers[0] + gfxHalf);
         g_GfxBuffers[2] = (g_GfxBuffers[1] + gfxHalf);
     }
 #else
-    g_GfxBuffers[0] = mempAllocBytesInBank(g_GfxSizesByPlayerCount[getPlayerCount() - 1] * 2, MEMPOOL_STAGE);
+    g_GfxBuffers[0] = mempAllocBytesInBank(g_GfxSizesByPlayerCount[getPlayerCount() - 1] * DYN_DOUBLE_BUFFER_COUNT, MEMPOOL_STAGE);
     g_GfxBuffers[1] = (g_GfxBuffers[0] + g_GfxSizesByPlayerCount[getPlayerCount() - 1]);
     g_GfxBuffers[2] = (g_GfxBuffers[1] + g_GfxSizesByPlayerCount[getPlayerCount() - 1]);
 #endif
 
-    g_VtxBuffers[0] = mempAllocBytesInBank(g_VtxSizesByPlayerCount[getPlayerCount() - 1] * 2, MEMPOOL_STAGE);
+    g_VtxBuffers[0] = mempAllocBytesInBank(g_VtxSizesByPlayerCount[getPlayerCount() - 1] * DYN_DOUBLE_BUFFER_COUNT, MEMPOOL_STAGE);
     g_VtxBuffers[1] = (g_VtxBuffers[0] + g_VtxSizesByPlayerCount[getPlayerCount() - 1]);
     g_VtxBuffers[2] = (g_VtxBuffers[1] + g_VtxSizesByPlayerCount[getPlayerCount() - 1]);
 
@@ -128,7 +138,7 @@ void *dynAllocate(s32 size) {
 }
 
 void dynSwapBuffers(void) {
-    g_GfxActiveBufferIndex = (g_GfxActiveBufferIndex ^ 1);
+    g_GfxActiveBufferIndex = (g_GfxActiveBufferIndex ^ (DYN_DOUBLE_BUFFER_COUNT - 1));
     g_GfxRequestedDisplayList = FALSE;
     g_GfxMemPos = g_VtxBuffers[g_GfxActiveBufferIndex];
 }

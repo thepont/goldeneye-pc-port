@@ -51,6 +51,7 @@
 #include "fs.h"
 #include "romdata.h"
 #include "crash.h"
+#include "all_unlocked_policy.h"
 
 #if defined(PLATFORM_WINDOWS)
 #include <windows.h> /* GetCurrentThreadId for thread-dump labels */
@@ -185,6 +186,25 @@ static int g_pqCount = 0;
 static uint64_t g_lastFrameUs = 0;
 static uint64_t g_lastHeartbeatUs = 0;
 static int g_framesRendered = 0;
+/* BDD probes must finish on an observed renderer boundary instead of relying
+ * on a wall-clock timeout. The timeout remains outside the process as a hang
+ * guard, while this opt-in counter gives the probe a deterministic lifetime. */
+static int g_bdd_exit_after_frames = -1;
+
+static void portMaybeExitAfterBddFrame(void)
+{
+    if (g_bdd_exit_after_frames < 0) {
+        const char *value = getenv("GE_BDD_EXIT_AFTER_FRAMES");
+        g_bdd_exit_after_frames = value != NULL ? atoi(value) : 0;
+    }
+    if (g_bdd_exit_after_frames > 0 &&
+        g_framesRendered >= g_bdd_exit_after_frames) {
+        sysLogPrintf(LOG_NOTE,
+                     "TEST_FRAME_EXIT: frames=%d limit=%d",
+                     g_framesRendered, g_bdd_exit_after_frames);
+        exit(0);
+    }
+}
 
 /* Forward decls: the VI retrace registration lives further down. */
 static OSMesgQueue *g_viRetraceMQ = NULL;
@@ -1288,14 +1308,12 @@ static void geEepromPatchAllCheats(u8 *buf)
          * slots only -- real saves (incl. a deliberately muted one) keep
          * their bytes. */
         {
-            const u8 *raw = (const u8 *)&slots[i];
-            int allzero = 1;
-            for (int b = 0; b < (int)sizeof(ge_save_slot); b++)
-                if (raw[b]) { allzero = 0; break; }
-            if (allzero && (slots[i].music_vol != 0xFF ||
-                            slots[i].sfx_vol   != 0xFF)) {
-                slots[i].music_vol = 0xFF;
-                slots[i].sfx_vol   = 0xFF;
+            GeAllUnlockedFreshSaveFields *fresh_fields =
+                (GeAllUnlockedFreshSaveFields *)&slots[i].completion_bitflags;
+            if (geAllUnlockedSlotIsZero(&slots[i], sizeof(ge_save_slot)) &&
+                (fresh_fields->music_vol != 0xFF ||
+                 fresh_fields->sfx_vol   != 0xFF)) {
+                geAllUnlockedSeedFreshSaveDefaults(fresh_fields);
                 changed = 1;
             }
         }
@@ -1422,6 +1440,7 @@ void osSpTaskStartGo(OSTask *t)
         /* A gfx task is also its own DP task (sp == dp in __scExec): the
          * DP "finishes" right after the RSP. */
         portPostEventForce(OS_EVENT_DP);
+        portMaybeExitAfterBddFrame();
     }
 }
 

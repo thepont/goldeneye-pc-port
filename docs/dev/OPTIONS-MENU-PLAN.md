@@ -1,8 +1,10 @@
 # In-game PC options menu — design + resume point
 
-Status: **config-system foundation landed (M-35); menu surface not built.**
-Pattern follows `docs/dev/AUDIO-PLAN.md` — a plan doc that a later session
-executes.
+Status: **implemented as the port-owned F10 overlay; this document now records
+the ownership boundary and test contract.** The config-system foundation and
+the overlay are both landed. The implementation is covered by deterministic
+unit tests, including controller navigation, both logical viewport sizes, the
+bitmap fallback clip contract, and the vector-font route.
 
 Findings context: D180 (input), D181 (first route-(b) hook). Config API:
 `configRegister{Int,UInt,Float,String}` with clamps (`port/include/config.h`).
@@ -28,10 +30,9 @@ So there is **no table to inject rows into**. A PC options surface is either
 
 ## 2. Recommended approach: (C) port-layer overlay
 
-A self-contained immediate-mode overlay in `port/`, toggled by a hotkey
-(e.g. `F10`), drawn as fast3d 2D quads + the game's own `textRender` over
-the top of whatever is on screen, with keyboard/mouse nav handled entirely
-in the port layer. Reasons:
+A self-contained immediate-mode overlay in `port/`, toggled by `F10` (or the
+controller Select/Back equivalent), is drawn as fast3d 2D quads over the game
+and navigated entirely in the port layer. Reasons:
 
 - **Zero `src/` menu-code edits.** No new bespoke nav function to get wrong
   (the watch-nav code is exactly the D118d / over-scroll family).
@@ -41,9 +42,10 @@ in the port layer. Reasons:
 - Precedent: the port already draws port-owned UI (FPS in the window title,
   F12 screenshot). This is the render-side equivalent.
 
-Cost: an immediate-mode widget layer (label, slider, toggle, dropdown) in
-fast3d 2D. ~300–500 lines. The `config.c` registry already gives us
-key/min/max/value + a type tag (after M-35) — enough to auto-generate rows.
+The landed widget layer uses explicit row metadata over the `config.c` registry
+so display labels, cycles, slider steps, hidden dependent rows, and restart
+markers remain readable and testable. The registry supplies the live pointer,
+type, and clamp bounds.
 
 ### Sketch
 
@@ -55,35 +57,86 @@ port/src/optionsoverlay.c
   optionsOverlayRender(Gfx**)   // called from a fast3d 2D hook after the game DL
 ```
 
-Registry additions needed in `config.c`:
-- `configForEachOption(cb)` — iterate {key, type, ptr, min, max}.
-- optional per-option metadata: display label, step, enum-value names,
-  "apply live" vs "needs restart". Add a `configRegisterIntEx(...)` variant
-  or a side table keyed by dotted key.
+The landed registry additions are `configForEachOption(cb)` and a metadata
+side table keyed by dotted option name. This keeps config persistence generic
+while the overlay owns presentation labels and enum names.
 
 Live-apply: most keys already re-read their variable every frame
 (`mouseAimSpeed`, `portScreenShakeScale`, `cfgVSync` via `videoSetVSync`).
 Ones that need a hook (MSAA, fullscreen) get an `configOnChange` callback
 or are flagged "restart".
 
-## 3. Minimum option set for v1
+## 3. Shipped option set for v1
 
 | Row | Key | Type | Notes |
 |---|---|---|---|
-| VSync | `Video.VSync` | toggle | live (`SDL_GL_SetSwapInterval`) |
-| Frame cap | `Video.FpsCap` | int slider 0–360 | live |
-| MSAA | `Video.MSAA` | dropdown 1/2/4/8 | needs FBO rebuild — flag "restart" for v1 |
-| Texture filter | `Video.TextureFilter` | dropdown nearest/bilinear/3-point | live-ish |
-| Mouse aim speed | `Input.MouseAimSpeed` | slider 1–100 | live |
-| Mouse turn speed | `Input.MouseTurnSpeed` | slider 1–100 | live |
-| Mouse invert Y | `Input.MouseInvertY` | toggle | live |
-| Capture mode | `Input.MouseCaptureMode` | toggle | live |
-| Screen shake | `Game.ScreenShakeIntensity` | slider 0–3 (×) | live (D181) |
-| Screenshot key | — | (F12, documented; rebind = later) | — |
+| Fullscreen / resolution | `Video.Fullscreen`, `__Resolution` | toggle / cycle | window request |
+| VSync / frame cap | `Video.VSync`, `Video.FpsCap` | toggle / 30–60 cycle | live |
+| Render mode | `Video.RenderMode` | cycle | live |
+| Dynamic lighting / bump maps | `Video.DynamicLighting`, `Video.BumpMaps` | toggles | live |
+| MSAA | `Video.MSAA` | OFF/2x/4x/8x cycle | restart marker |
+| Texture quality fixes | `Video.TextureFilter`, `Video.FixMipTextures`, `Video.WrapFix` | cycle / toggles | live |
+| Scale and distance | `Video.FovScale`, `Video.DrawDistance`, `Video.LodDistance` | sliders | live |
+| Automatic scale policies | `Video.WidescreenAuto`, `Video.DrawDistanceAutoFov`, `Video.LodDistanceAutoFov` | toggles | live |
+| Post processing | `Video.PostFX`, `Video.Sharpen`, `Video.DepthOfField` | toggle / slider / toggle | live |
+| Other video | `Video.Anisotropy`, `Video.SafeAreaCrop` | slider / toggle | live |
+| Input/game convenience | `Input.MouseSensitivity`, `Input.MouseInvertY`, `Input.PadLookInvertY`, `Game.NoHitFlash`, `Game.AllUnlocked` | slider/toggles | live or next launch |
+| Quit | `__QuitToDesktop` | action | exits |
 
 `configSave()` on overlay close.
 
-## 4. Alternative if an in-fiction surface is required later
+## 4. Feasibility of assigning PC graphics settings to the watch menu
+
+Recommendation: keep PC graphics settings in the F10 overlay. Do not add the
+graphics rows directly to the existing watch menu.
+
+The watch menu is game-owned (`src/game/options.c`) and its five pages are
+hand-drawn, localized N64 UI with game-state setters and save-data semantics.
+The F10 rows are port-owned host settings: resolution, MSAA, renderer mode,
+post-processing, bump maps, texture repair toggles, and draw/LOD distance.
+Those values may be changed in the front end or during a level and some of
+them require SDL/OpenGL invalidation or a live-renderer request. Putting them
+in the watch menu would couple `src/game` to the host config registry and
+would need a new bridge for ownership, persistence, apply timing, and layout.
+It would also make the N64 watch-menu path harder to keep verbatim.
+
+Controller inversion is a separate, lower-cost question but still needs one
+source of truth. The watch menu's `LOOK_UPDOWN` option is a game/player
+setting (`get_cur_player_look_vertical_inverted()`); `Input.PadLookInvertY` is
+the port's SDL right-stick mapping setting. They should not be presented as
+two independent toggles that can disagree. If the product requirement is to
+make inversion discoverable in the watch menu, the appropriate future design
+is one narrow port bridge that edits the same `Input.PadLookInvertY` value,
+with a test proving both surfaces read and write the same setting. It is not
+appropriate to move the graphics rows into that menu.
+
+A future watch-menu entry labelled “PC graphics…” could be reasonable as a
+launcher for the existing overlay, but it should call a port-owned callback
+and leave all row state, rendering, and persistence in `port/`. That bridge
+would need its own navigation and “overlay owns controller 0” tests before it
+is enabled.
+
+## 5. Text/rendering test contract
+
+The overlay has two valid text paths:
+
+- enhanced/remaster mode queues printable menu text into the current frame's
+  vector batch; the late queue is required because the overlay is emitted
+  after the game's display-list build;
+- when vector text is unavailable or its batch is full, the bitmap path uses
+  the full VI viewport as the clip rectangle and uses bitmap-font metrics for
+  right-aligned values and centered controls. Passing a measured string
+  width/height there clips glyphs, or using vector advances for bitmap output
+  misplaces values, making the menu look blank or corrupted.
+
+`ge007_options_overlay` tests both paths at the in-level and front-end logical
+viewport sizes, checks row baselines do not overlap, and drives the graphics
+rows with a fake controller A edge. `ge007_vector_text_frame` separately pins
+the current-versus-pending batch boundary. A real GPU screenshot remains a
+useful final visual check, but it is not needed to establish these deterministic
+unit contracts.
+
+## 6. Alternative if an in-fiction surface is required later
 
 Route (B): a new front-end screen `constructor_menuXX_pcoptions` +
 `menuXX_pcoptions_navigation` in `front.c` under `#ifdef PORT`, reached from
@@ -92,16 +145,13 @@ a new "PC OPTIONS" row on the main options menu. Each row calls a
 change) → its own Dxx, N64 verbatim under `#else`, opt-in. More faithful,
 more surface area, more nav bugs. Defer unless the owner wants it in-fiction.
 
-## 5. Resume checklist
+## 7. Follow-up checklist
 
-1. Add `configForEachOption` + a label/step/enum side-table to `config.c`.
-2. Build the fast3d 2D immediate-mode widget helpers (reuse `gDPFillRectangle`
-   + `textRender`; see how `options.c draw_watch_game_options_page` emits
-   text for the font/`Gfx**` conventions).
-3. `port/src/optionsoverlay.c` state machine + F10 toggle in `video.c`.
-4. Route input: when open, `inputComputePad` idx 0 returns a neutral pad and
-   forwards nav to the overlay (same "swallow" pattern WI-1 uses for the
-   free-cursor click).
-5. `configOnChange` hooks for MSAA/fullscreen; everything else is live.
-6. Verify: overlay open/close in-level and in the front end; golden dumps
-   unaffected with the overlay closed (it draws nothing).
+1. Keep `ge007_options_overlay` and `ge007_vector_text_frame` green when rows,
+   labels, or frame ownership change.
+2. If a watch-menu launcher is desired, add it as a separate port bridge with
+   tests for ownership, controller swallowing, close/resume, and shared
+   controller-inversion state.
+3. Perform one bounded live screenshot check at both an in-level and a
+   front-end screen. The deterministic tests cover the layout and font
+   routing; they do not replace a GPU-specific visual check.

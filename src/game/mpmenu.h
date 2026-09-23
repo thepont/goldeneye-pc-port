@@ -31,7 +31,13 @@ struct AwardMetrics {
 extern s32 g_stopPlayFlag;
 extern s32 g_gameOverFlag;
 
+s32 mpwatchMenuCanGoRight(void);
+s32 mpwatchMenuCanGoLeft(void);
 void mpwatchUnpauseGame(void);
+s32 mpFindMaxInt(s32 numplayers, s32 value0, s32 value1, s32 value2, s32 value3);
+s32 mpFindMinInt(s32 numplayers, s32 value0, s32 value1, s32 value2, s32 value3);
+s32 mpFindMaxFloat(s32 numplayers, f32 value0, f32 value1, f32 value2, f32 value3);
+s32 mpFindMinFloat(s32 numplayers, f32 value0, f32 value1, f32 value2, f32 value3);
 Gfx *display_text_for_playerdata_on_MP_menu(Gfx *gdl, s32 x, s32 y, s32 points, TEXTCOLORS text_color);
 
 s32 checkGamePaused(void);

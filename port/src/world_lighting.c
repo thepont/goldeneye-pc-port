@@ -5,14 +5,6 @@
 #include "game/explosion.h"
 #include "game/player.h"
 
-static int worldLightingBoundCount(s32 count, s32 capacity)
-{
-    if (count <= 0) {
-        return 0;
-    }
-    return count < capacity ? count : capacity;
-}
-
 static int worldLightingWorldToView(const coord3d *world, float view[3])
 {
     Mtxf *camera;
@@ -77,15 +69,17 @@ static float worldLightingExplosionVisualSize(const struct Explosion *explosion)
 
 static void worldLightingSubmitExplosions(void)
 {
-    const int count = worldLightingBoundCount(g_NumExplosionEntries,
-                                              EXPLOSION_BUFFER_LEN);
     int index;
 
     if (g_ExplosionBuffer == NULL) {
         return;
     }
 
-    for (index = 0; index < count; ++index) {
+    /* g_NumExplosionEntries is the legacy screen-shake countdown. The
+     * explosion buffer is fixed-size and prop is the authoritative live-slot
+     * marker, so scan every slot rather than dropping lights as the shake
+     * timer expires. */
+    for (index = 0; index < EXPLOSION_BUFFER_LEN; ++index) {
         const struct Explosion *explosion = &g_ExplosionBuffer[index];
         if (explosion->prop == NULL) {
             continue;

@@ -92,11 +92,19 @@ void alloc_false_GUARDdata_to_exec_global_action(void)
 
 void debug_object_load_all_models(void)
 {
-    u8 *cmd = &g_CurrentSetup.ailists[0].ailist->cmd;
-    s32 i = 0;
+    u8 *cmd;
+    s32 i;
     u16 id;
 
-    if (!cmd) { return; }
+    /* Empty level setup data is valid while a level is being torn down. */
+    if (g_CurrentSetup.ailists == NULL ||
+        g_CurrentSetup.ailists[0].ailist == NULL)
+    {
+        return;
+    }
+
+    i = 0;
+    cmd = &g_CurrentSetup.ailists[0].ailist->cmd;
 
     do
     {
@@ -138,8 +146,12 @@ void debug_object_load_all_models(void)
         }
 
         i++;
+        if (g_CurrentSetup.ailists[i].ailist == NULL)
+        {
+            break;
+        }
         cmd = &g_CurrentSetup.ailists[i].ailist->cmd;
-    } while (cmd);
+    } while (TRUE);
 }
 
 

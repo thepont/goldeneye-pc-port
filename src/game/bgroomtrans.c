@@ -34,8 +34,28 @@ Mtx roomMatrices[AMT300];
 void initializeRoomData(void)
 {
     int i;
+    s32 player_count = getPlayerCount();
+    s32 room_count = getMaxNumRooms();
 
-    for (i=0; i<getPlayerCount(); i++)
+    if (player_count < 0)
+    {
+        player_count = 0;
+    }
+    else if (player_count > MAX_PLAYER_COUNT)
+    {
+        player_count = MAX_PLAYER_COUNT;
+    }
+
+    if (room_count < 0)
+    {
+        room_count = 0;
+    }
+    else if (room_count > AMT300)
+    {
+        room_count = AMT300;
+    }
+
+    for (i=0; i<player_count; i++)
     {
         g_playerPointers[i]->curRoomIndex = -1;
     }
@@ -50,7 +70,7 @@ void initializeRoomData(void)
 
     }
 
-    for (i=0; i<getMaxNumRooms(); ++i)
+    for (i=0; i<room_count; ++i)
     {
         g_BgRoomInfo[i].field_36 = -1;
     }
@@ -217,7 +237,7 @@ s32 setupRoomTransformationMatrix(s32 room)
     roomTransformMatrix.m[3][1] = (ptr_bgdata_room_fileposition_list[room].pos.f[1] * room_data_float2) - g_CurrentPlayer->current_model_pos.f[1];
     roomTransformMatrix.m[3][2] = (ptr_bgdata_room_fileposition_list[room].pos.f[2] * room_data_float2) - g_CurrentPlayer->current_model_pos.f[2];
 
-    matrix_4x4_f32_to_s32(&roomTransformMatrix, &roomMatrices[mtx]);
+    matrix_4x4_f32_to_s32(roomTransformMatrix.m, roomMatrices[mtx].m);
 
     return mtx;
 }
@@ -260,4 +280,3 @@ void getRoomPositionScaledByIndex(s32 roomID, coord3d *scaledPos)
     scaledPos->y = ptr_bgdata_room_fileposition_list[roomID].pos.y * room_data_float2;
     scaledPos->z = ptr_bgdata_room_fileposition_list[roomID].pos.z * room_data_float2;
 }
-

@@ -8,6 +8,7 @@ extern "C" {
 /* Presentation-only adaptive sharpening. It runs after the final Fast3D
  * composite and fails open if the active OpenGL context cannot support it. */
 void ascensionPostFxApply(void);
+int ascensionPostFxWantsDepth(void);
 void ascensionPostFxShutdown(void);
 
 #ifdef __cplusplus

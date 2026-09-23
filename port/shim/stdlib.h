@@ -17,6 +17,8 @@
 #include "hoststdlib.h"
 #else
 #include "include/stdlib.h"
+extern int atoi(const char *);
+extern void exit(int);
 #if !defined(_WIN32)
 /* The N64 stub declares only lldiv_t/ldiv_t + lldiv/ldiv. MinGW's other CRT
  * headers leak getenv() etc.; a strict host GCC (Linux/macOS) does not, so

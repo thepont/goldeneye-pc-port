@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include "audiotrace.h"  /* D202/M-71 diag probe only ([DISTVOL]); remove with it */
 #include <stddef.h>
+#include "gfx_water_material_api.h"
 #endif
 #include <PR/libaudio.h>
 #include <assets/oddtextures.h>
@@ -178,9 +179,9 @@
 /* 0x80030AF4 */ s32 g_RemoteMineOwnerTriggerFlag = 0;
 /* 0x80030AF8 */ s32 g_NextWeaponSlot = 0; // numbers between 0 and 30
 /* 0x80030AFC */ s32 g_NextHatSlot = 0;
-/* 0x80030B00 */ ObjectRecord *g_LevelLoadPropSwitch = NULL;
+/* 0x80030B00 */ struct LinkRecord *g_LevelLoadPropSwitch = NULL;
 /* 0x80030B04 */ LockDoorRecord *g_LevelLoadPropLockDoor = NULL;
-/* 0x80030B08 */ ObjectRecord *g_LevelLoadPropSafeItem = NULL;
+/* 0x80030B08 */ SafeObjectRecord *g_LevelLoadPropSafeItem = NULL;
 /* 0x80030B0C */ struct PropRecord * D_80030B0C = NULL;
 /* 0x80030B10 */ s32 bodypartshot = 0xFFFFFFFF;
 /* 0x80030B14 */ f32 F_80030B14 = 1.0;
@@ -5708,6 +5709,17 @@ s32 objTick(struct PropRecord *prop)
 				poTruck->flags &= ~PROPFLAG_INMOTION;
 				sub_GAME_7F044B38(poTruck);
 			}
+#if defined(PORT)
+			/* Speedboat is a real gameplay vehicle, not a renderer fixture. Its
+			 * current transform is converted by the port adapter and stationary
+			 * speed naturally produces no wake. */
+			if (obj->obj == PROP_SPEEDBOAT)
+			{
+				gfx_water_boat_wake_world(obj->runtime_pos.x,
+					obj->runtime_pos.z, poTruck->roty,
+					poTruck->speed, 0.20f);
+			}
+#endif
 		}
 		else if (obj->type == PROPDEF_AIRCRAFT)
 		{
@@ -7706,7 +7718,7 @@ void objDeform(ObjectRecord *obj, E_EXPLOSIONTYPE explosiontype)
         adjust_height = 1;
     }
     
-    newverts = vtxstore_allocate(rodata->numVertices, 0x0b0b, model->obj, objGetDestroyedLevel(obj));
+    newverts = (Vertex *)(uintptr_t)vtxstore_allocate(rodata->numVertices, 0x0b0b, model->obj, objGetDestroyedLevel(obj));
     
     if (newverts != NULL)
     {

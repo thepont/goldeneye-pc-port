@@ -5,6 +5,10 @@
 
 
 u32 decompressdata(u8 *src, u8 *dst, struct huft *hlist);
+#ifdef PORT
+uintptr_t rzipGetSomething(void);
+#else
 s32 rzipGetSomething(void);
+#endif
 
 #endif

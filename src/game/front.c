@@ -40,8 +40,12 @@
 #include "bg.h"
 #ifdef PORT
 #include <stdio.h>
+#include <stdint.h>
 #include "romdata.h" /* D178: briefing-segment byte-order fixup */
 #include "coop.h"
+#include "controller_mapping.h"
+#include "vector_text.h"
+#include "vector_text_route_policy.h"
 #endif
 #include "chrai.h"
 #include "title.h"
@@ -315,7 +319,11 @@ s32 is_emulating_spectrum = FALSE;
 s32 is_cheat_menu_available = FALSE;
 
 u8 * ptr_logo_and_walletbond_DL = NULL;
+#ifdef PORT
+u8 * ptr_menu_videobuffer = NULL;
+#else
 s32 ptr_menu_videobuffer = 0;
+#endif
 struct Model *logoinst = NULL;
 struct Model * walletinst[] = { NULL, NULL, NULL, NULL};
 
@@ -971,6 +979,37 @@ void set_cursor_pos_difficulty(int difficulty);
 
 Gfx *frontPrintText(Gfx *gdl, s32 *x, s32 *y, s8 *text, s32 second_font_table, s32 first_font_table, s32 arg6, s32 view_x, s32 view_y, s32 arg9, s32 arga)
 {
+#ifdef PORT
+    const int vector_enabled = gfx_vector_text_enabled();
+    if (geVectorTextCanReplaceBitmap(vector_enabled, (const char *)text))
+    {
+        const u32 colour = (u32)arg6;
+        int queued;
+        if (j_text_trigger != 0)
+        {
+            queued = gfx_vector_text_queue_outlined(
+                *x, *y, (const char *)text, colour,
+                (textglowR.r << 0x18) | (textglowG.r << 0x10) |
+                (textglowB.r << 8) | textglowA.r);
+        }
+        else
+        {
+            queued = gfx_vector_text_queue(*x, *y, (const char *)text, colour);
+        }
+        if (queued)
+        {
+            static int briefing_trace = -1;
+            if (briefing_trace < 0) {
+                briefing_trace = getenv("GE_BRIEFING_FONT_TRACE") != NULL;
+            }
+            if (briefing_trace && current_menu == MENU_BRIEFING) {
+                fprintf(stderr, "BRIEFING_FONT_TRACE: route=vector page=%d text=%s\n",
+                        (int)current_menu_briefing_page, (const char *)text);
+            }
+            return gdl;
+        }
+    }
+#endif
     if (j_text_trigger != 0)
     {
         gdl = textRenderOutlined(
@@ -2942,6 +2981,30 @@ void interface_menu06_modesel(void)
     }
     frontUpdateControlStickPosition();
 #ifdef PORT
+    if (!tab_prev_highlight)
+    {
+        s32 mode_direction = 0;
+        if (joyGetButtonsPressedThisFrame(PLAYER_1, U_JPAD | U_CBUTTONS) != 0)
+        {
+            mode_direction = -1;
+        }
+        else if (joyGetButtonsPressedThisFrame(PLAYER_1, D_JPAD | D_CBUTTONS) != 0)
+        {
+            mode_direction = 1;
+        }
+
+        if (mode_direction != 0)
+        {
+            mission_difficulty_highlighted = geControllerMenuModeMove(
+                mission_difficulty_highlighted,
+                mode_direction,
+                joyGetControllerCount() >= 2,
+                joyGetControllerCount() >= 2,
+                is_cheat_menu_available);
+            setCursorPOSforMode(mission_difficulty_highlighted);
+        }
+    }
+
     if (!is_cheat_menu_available && cursor_v_pos > 284.0f)
     {
         cursor_v_pos = 284.0f;
@@ -8066,7 +8129,12 @@ void init_menu18_displaycast(void)
 
     bufferRemaining = bufferRemaining + allocSize; 
 
+#ifdef PORT
+    zbufSetBuffer((u8 *)(((uintptr_t)(bufferPtr + bufferRemaining) + 0x3FU) & ~(uintptr_t)0x3FU),
+                  Z_BUFFER_4_3_WIDTH, Z_BUFFER_4_3_HEIGHT);
+#else
     zbufSetBuffer(ALIGN64_V2(bufferPtr + bufferRemaining), Z_BUFFER_4_3_WIDTH, Z_BUFFER_4_3_HEIGHT);
+#endif
     texInitPool(&texPool, bufferPtr, allocSize);
 
     bufferRemaining -= allocSize;

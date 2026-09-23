@@ -227,6 +227,7 @@ and the [finding log](https://github.com/jkdansereau/goldeneye-pc-port/tree/main
 - [Internals](internals.md): architecture, the software RSP-emulation approach, GoldenEye-vs-Perfect-Dark engine differences, the phased plan.
 - [Porting notes](porting-notes.md): the recurring Nintendo 64 → PC bug classes hit during the port, with fixes.
 - [Building](building.md): full build and asset-extraction guide.
+- [Depth of field](dev/DEPTH-OF-FIELD.md): GPU Gems review, difficulty assessment, and the test-first implementation contract.
 
 ---
 

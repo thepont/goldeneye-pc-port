@@ -627,6 +627,9 @@ void inputDestroy(void)
  * mouse-aim delta into the accumulator. */
 void inputUpdate(void)
 {
+    if (getenv("GE_SKIP_INPUT") != NULL) {
+        return;
+    }
     SDL_GameControllerUpdate();
 
     if (!mouseEnabled || !mouseGrabbed) {
@@ -722,6 +725,11 @@ static int actHeld(const Uint8 *ks, int act)
 /* Fill button mask + stick for controller idx. Returns the 16-bit mask. */
 unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
 {
+    if (getenv("GE_SKIP_INPUT") != NULL) {
+        if (stick_x) *stick_x = 0;
+        if (stick_y) *stick_y = 0;
+        return 0;
+    }
     unsigned button = 0;
     int sx = 0, sy = 0;
 
@@ -1130,7 +1138,7 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
 
             int rxs = geControllerScaleAxis(rx, padDeadzone, STICK_MAX);
             int rys = -geControllerScaleAxis(ry, padDeadzone, STICK_MAX);   /* SDL up = negative -> N64 up = positive */
-            if (padLookInvertY) rys = -rys;
+            rys = geControllerApplyLookInvertY(rys, padLookInvertY);
             if (rxs) sx = rxs;
             if (rys) sy = rys;
         } else {
@@ -1139,7 +1147,7 @@ unsigned inputComputePad(int idx, signed char *stick_x, signed char *stick_y)
             if (px) sx = px;
             if (py) sy = py;
 
-            if (padLookInvertY) ry = -ry;
+            ry = geControllerApplyLookInvertY(ry, padLookInvertY);
             if (geControllerAxisPastThreshold(rx, RSTICK_THRESHOLD, 1)) button |= GE_CONT_F;
             if (geControllerAxisPastThreshold(rx, RSTICK_THRESHOLD, 0)) button |= GE_CONT_C;
             if (geControllerAxisPastThreshold(ry, RSTICK_THRESHOLD, 1)) button |= GE_CONT_D;
@@ -1260,6 +1268,9 @@ static void reconcileGrab(int menuMode)
  * this covers the free-but-focused states (menus, pre-click stage). */
 static void applyCursorVisibility(void)
 {
+    if (getenv("GE_SKIP_CURSOR") != NULL) {
+        return;
+    }
     /* D194: while an aim hold has the cursor out for absolute aim, show it --
      * the user is pointing with it and needs to see where. */
     int hide = windowFocused && mouseEnabled && !s_absAimSuspend;
@@ -1269,6 +1280,9 @@ static void applyCursorVisibility(void)
 /* video.c focus events. Records focus and lets reconcileGrab() decide. */
 void inputSetMouseGrab(int on)
 {
+    if (getenv("GE_SKIP_MOUSE_GRAB") != NULL) {
+        return;
+    }
     windowFocused = on ? 1 : 0;
     reconcileGrab(0);   /* menuMode re-checked on the next poll anyway */
     applyCursorVisibility();

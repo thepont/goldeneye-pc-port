@@ -82,9 +82,16 @@ static void portPrintHelp(const char *argv0)
 static void portAtExit(void)
 {
     /* Clean-exit only (exit(0) from videoPumpEvents). Crash/fatal paths call
-     * abort(), which does not run atexit handlers. */
+     * abort(), which does not run atexit handlers.
+     *
+     * The game threads are real pthreads and the renderer owns C++ texture
+     * caches. A normal exit() would run this handler and then destroy those
+     * globals while the scheduler can still be submitting a display list.
+     * Persist first, then use _Exit so process teardown cannot race the live
+     * renderer. */
     videoSaveWindowState();
     configSave();
+    _Exit(0);
 }
 
 int main(int argc, char **argv)
@@ -196,9 +203,23 @@ int main(int argc, char **argv)
         sysLogPrintf(LOG_ERROR, "videoInit failed");
         return 1;
     }
-    audioInit();
-    mixerInit();
-    inputInit();
+    if (getenv("GE_DIAG_SKIP_AUDIO") == NULL) {
+        audioInit();
+        mixerInit();
+    }
+    if (getenv("GE_DIAG_SKIP_INPUT_INIT") == NULL) {
+        inputInit();
+    }
+
+    if (getenv("GE_DIAG_VIDEO_ONLY") != NULL) {
+        for (int frame = 1; frame <= 8; ++frame) {
+            videoStartFrame();
+            videoSubmitCommands(NULL);
+            videoEndFrame();
+            sysLogPrintf(LOG_NOTE, "video-only frame %d submitted", frame);
+        }
+        return 0;
+    }
 
     /* 4. Run the game. mainproc() runs as the N64 mainThread (a real OS
      *    thread with its own stack); it creates the rmon/idle/scheduler/
@@ -219,12 +240,12 @@ int main(int argc, char **argv)
         extern struct jpncharpixels *g_JpnCharCachePixels; /* src/game/language.c:27 */
         extern struct jpncacheitem  *g_JpnCacheCacheItems; /* src/game/language.c:29 */
         if (!j_text_trigger) {
-            static struct jpncharpixels jpnPixels[124 * 8]; /* 0x2E80 bytes, langInit's size */
-            static struct jpncacheitem  jpnItems[124];      /* 124 slots; langInit over-allocates 0x100 (128) but only ever uses 0x7C */
+            static struct jpncharpixels jpnPixels[JPN_CACHE_ENTRY_COUNT * JPN_CACHE_PIXEL_STRIDE];
+            static struct jpncacheitem  jpnItems[JPN_CACHE_ENTRY_COUNT];
             s32 i;
-            _Static_assert(sizeof(jpnPixels) == 0x2E80,
+            _Static_assert(sizeof(jpnPixels) == JPN_CACHE_PIXEL_BYTES,
                            "JPN pixel stub size must match langInit (language.c:248)");
-            for (i = 0; i < 124; i++) {
+            for (i = 0; i < JPN_CACHE_ENTRY_COUNT; i++) {
                 jpnItems[i].ttl = 0;
                 jpnItems[i].codepoint = -1;
             }

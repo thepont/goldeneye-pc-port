@@ -322,7 +322,7 @@ void fogLoadCurrentEnvironment(EnvironmentRecord *arg0)
 #else
     viSetZRange(arg0->Visibility.BlendMultiplier, arg0->Visibility.FarFog);
 #endif
-    viGetZRange(&zrange);
+    viGetZRange(zrange);
 
     temp_f0 = bgGetLevelVisibilityScale();
     zrange[0] /= temp_f0;

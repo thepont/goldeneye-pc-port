@@ -21,6 +21,16 @@ struct GfxDimensions {
     float aspect_ratio;
 };
 
+/* The game viewport rectangles captured during the current frame. Coordinates
+ * use the OpenGL bottom-left origin so the presentation shader can keep blur
+ * samples inside each player view. */
+struct GfxPostFxViewport {
+    int x;
+    int y;
+    uint32_t width;
+    uint32_t height;
+};
+
 struct GfxInitSettings {
     struct GfxWindowManagerAPI *wapi;
     struct GfxRenderingAPI *rapi;
@@ -58,6 +68,11 @@ void gfx_set_wrap_fix(int on);
 void gfx_set_anisotropy_level(int level);  /* 1 = off; clamped to GL max */
 void gfx_set_safe_area_crop(int on);       /* crop the N64 TV-overscan safe-area margin instead of showing it as black bars */
 void gfx_set_dynamic_lighting(int on);     /* port-only camera point light */
+void gfx_set_bump_maps_path(const char *path); /* generated normal-map sidecar directory */
+void gfx_set_bump_maps_enabled(int on);        /* use sidecar maps in enhanced rendering */
+int gfx_get_bump_maps_enabled(void);            /* shared ordinary-stream feature state */
+void gfx_register_texture_source(const uint8_t *source_address,
+                                 const uint8_t *rom_address);
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -79,5 +94,13 @@ void gfx_resize_framebuffer(int fb, uint32_t width, uint32_t height, int upscale
 void gfx_set_framebuffer(int fb, float noise_scale) ;
 void gfx_reset_framebuffer(void);
 void gfx_copy_framebuffer(int fb_dst, int fb_src, int left, int top, int use_back);
+#ifdef __cplusplus
+extern "C" {
+#endif
+size_t gfx_get_postfx_viewports(struct GfxPostFxViewport *out, size_t capacity);
+int gfx_get_postfx_depth_source(uintptr_t *texture, uint32_t *width, uint32_t *height);
+#ifdef __cplusplus
+}
+#endif
 
 #endif

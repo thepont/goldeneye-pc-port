@@ -133,7 +133,9 @@ u8 * get_text_for_objective(int objectiveIndex)
 {
     u8 *textptr;
     
-    if ((objectiveIndex < 10) && (objective_ptrs[objectiveIndex] != 0)) {
+    if ((objectiveIndex >= 0) &&
+        (objectiveIndex < OBJECTIVES_MAX) &&
+        (objective_ptrs[objectiveIndex] != 0)) {
         return langGet(objective_ptrs[objectiveIndex]->text);
     }
     return 0;
@@ -145,7 +147,7 @@ s32 get_difficulty_for_objective(s32 objectiveIndex)
 {
     struct objective_entry * entry;
 
-    if (objectiveIndex < OBJECTIVES_MAX)
+    if ((objectiveIndex >= 0) && (objectiveIndex < OBJECTIVES_MAX))
     {
         entry = objective_ptrs[objectiveIndex];
         if (entry != NULL)
@@ -173,9 +175,9 @@ OBJECTIVESTATUS get_status_of_objective(s32 objectiveNum) //#MATCH
     OBJECTIVESTATUS         currentstatus;
     OBJECTIVESTATUS         status = OBJECTIVESTATUS_COMPLETE;
 
-    if (objectiveNum < 10)
+    if ((objectiveNum >= 0) && (objectiveNum < OBJECTIVES_MAX))
     {
-        if (!&objective_ptrs[objectiveNum]->id)
+        if (objective_ptrs[objectiveNum] == NULL)
         {
             status = objectiveStatuses[objectiveNum];
         }

@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include "coop.h"
 #include <boss.h>
+#include "gfx_water_material_api.h"
+#include "bgfog.h"
+#include "vector_text.h"
 #endif
 #include <os_extension.h>
 #include <PR/libaudio.h>
@@ -743,6 +746,13 @@ Gfx *lvlPortalDebug7F0BDF10(Gfx *gdl)
 
 Gfx* lvlRender(Gfx* DL)
 {
+#ifdef PORT
+    /* Build the port-owned vector overlay in a private transaction. The
+     * renderer runs on the scheduler while the game can be constructing the
+     * next display list; publishing individual text calls made the briefing
+     * and gameplay HUD appear in fragments for one frame. */
+    gfx_vector_text_begin_build();
+#endif
     gSPSegment(DL++, SPSEGMENT_PHYSICAL, NULL);
     gSPSegment(DL++, SPSEGMENT_UNKNOWN, osVirtualToPhysical(ptr_font_DL));
 
@@ -800,6 +810,9 @@ Gfx* lvlRender(Gfx* DL)
              * clipped to this player's split-screen viewport, as in PD. */
             DL = bgScissorCurrentPlayerViewDefault(DL);
 #endif
+#ifdef PORT
+            DL = gfx_emit_water_scene_begin(DL);
+#endif
             DL = skyRender(DL);
             bgRoomVisibilityRelated();
             propsTick();
@@ -815,6 +828,25 @@ Gfx* lvlRender(Gfx* DL)
 
             propsTickPlayer();
             DL = bgLevelRender(DL);
+
+#ifdef PORT
+            /* Enhanced water is an authored physical world surface. Submit
+             * it after opaque rooms/props so the composite can use the real
+             * scene depth for ships, dam walls, and contact foam. Original
+             * mode remains on the legacy sky fan in sky.c. */
+            if (gfx_water_world_surface_enabled() &&
+                fogGetCurrentEnvironmentp()->IsWater)
+            {
+                DL = gfx_emit_world_water_surface(
+                    DL, bossGetStageNum(),
+                    fogGetCurrentEnvironmentp()->WaterRepeat);
+            }
+
+            /* Mark the exact post-world boundary here; the PC backend
+             * composites captured water only now, before tracers and the HUD
+             * can be painted. */
+            DL = gfx_emit_water_composite(DL);
+#endif
 
             if (get_debug_portal_flag())
             {
@@ -910,6 +942,9 @@ Gfx* lvlRender(Gfx* DL)
 
     gDPSetScissor(DL++, G_SC_NON_INTERLACE, 0, 0, viGetX(), viGetY());
 
+#ifdef PORT
+    gfx_vector_text_end_build();
+#endif
     return DL;
 }
 

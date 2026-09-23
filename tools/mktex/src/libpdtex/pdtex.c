@@ -5,6 +5,11 @@
 #include <string.h>
 #include "pdtex.h"
 
+/* The game's legacy include tree supplies an N64-compatible stdlib.h that
+ * omits these host allocation declarations. Keep the host tool explicit. */
+extern void *calloc(size_t count, size_t size);
+extern void free(void *pointer);
+
 /**
  * libpdtex - A library for reading and writing PD textures.
  *
@@ -98,13 +103,19 @@ int pdtex_read(struct pd_tex *tex, char *filename)
 		return errno;
 	}
 
-	if (!reader_read(fp, tex)) {
+	int result = pdtex_read_stream(tex, fp);
+	fclose(fp);
+
+	return result;
+}
+
+int pdtex_read_stream(struct pd_tex *tex, FILE *fp)
+{
+	if (!tex || !fp) {
 		return 1;
 	}
 
-	fclose(fp);
-
-	return 0;
+	return reader_read(fp, tex) ? 0 : 1;
 }
 
 int pdtex_write(struct pd_image *image, char *filename)

@@ -18,6 +18,7 @@ void alloc_explosion_smoke_casing_scorch_impact_buffers(void)
     g_NumScorchEntries = 0;
     g_NumImpactEntries = 0;
     g_SpExplosionDamageMult = 1.0f;
+    g_ScorchBuffer = NULL;
 
     osSyncPrintf("Allocating %d bytes for explosion data\n", EXPLOSION_BUFFER_LEN * sizeof(struct Explosion));
     g_ExplosionBuffer = (struct Explosion *)mempAllocBytesInBank(EXPLOSION_BUFFER_LEN * sizeof(struct Explosion), MEMPOOL_STAGE);

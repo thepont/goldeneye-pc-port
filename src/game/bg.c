@@ -20,10 +20,28 @@
 #include "stan.h"
 #include "explosion.h"
 #include "bgroomtrans.h"
+#ifdef PORT
+#include "level_status_contract_policy.h"
+#endif
 
 
 #define BG_STACK_SIZE 20
 #define STAGES_MAX 38
+
+#ifdef PORT
+static int bgPortPortalGeometryIsValid(s32 portalnum)
+{
+    bg_portal_entry *portal;
+
+    if (portalnum < 0 || portalnum >= PORTMAX || g_BgPortals == NULL)
+    {
+        return 0;
+    }
+    portal = g_BgPortals[portalnum].offset_portal;
+    return gePortalPointsCurrentlyAccepted(
+        portal, portal != NULL ? portal->numPoints : 0);
+}
+#endif
 
 typedef struct GlobalVisCommand {
     u8 type;
@@ -1282,6 +1300,12 @@ void bgFindRoomsAlongSegment(coord3d *fromPos, coord3d *toPos, u8 *fromRooms, u8
 Gfx *bgLevelRender(Gfx *arg0)
 {
     gSPSetLights1(arg0++, GlobalLight);
+#ifdef PORT
+    /* skyRender intentionally clears G_LIGHTING for its unlit fan. Reloading
+     * the light registers does not restore that geometry bit, so explicitly
+     * re-enable it before the room display lists consume GlobalLight. */
+    gSPSetGeometryMode(arg0++, G_LIGHTING);
+#endif
     gSPLookAt(arg0++, sub_GAME_7F078474());
     gSPSegment(arg0++, SPSEGMENT_BG_DL, ptr_bg_data);
 
@@ -1571,6 +1595,13 @@ s32 sub_GAME_7F0B5528(s32 portalnum, f32 arg1, coord3d *arg2)
     s32 allbehind;
     struct PortalMetric metric;
     s32 len;
+
+#ifdef PORT
+    if (!bgPortPortalGeometryIsValid(portalnum))
+    {
+        return 0;
+    }
+#endif
 
     matrix = camGetWorldToScreenMtxf();
     allbehind = 1;
@@ -5350,6 +5381,19 @@ void sub_GAME_7F0B96CC(s32 portalnum, f32 *out)
     f32 dot;
     s32 i;
 
+#ifdef PORT
+    if (!bgPortPortalGeometryIsValid(portalnum))
+    {
+        if (out != NULL)
+        {
+            out[0] = 0.0f;
+            out[1] = 0.0f;
+            out[2] = 0.0f;
+        }
+        return;
+    }
+#endif
+
     for (i = 0; i < 3; i++)
     {
         sp6c[i] = (&g_BgPortals[portalnum].offset_portal->point)[0].f[i] - (&g_BgPortals[portalnum].offset_portal->point)[1].f[i];
@@ -5806,6 +5850,13 @@ s32 sub_GAME_7F0B9F14(s32 portalnum, coord3d *pos1, coord3d *pos2)
     u8 seenA;
     u8 seenB;
 
+#ifdef PORT
+    if (!bgPortPortalGeometryIsValid(portalnum))
+    {
+        return 0;
+    }
+#endif
+
     seenA = 0;
     seenB = 0;
 
@@ -5940,6 +5991,14 @@ void sub_GAME_7F0BA2D4(coord3d *bbmin, coord3d *bbmax, s32 *room_list, s32 *coun
                     portal_min = *(coord3d *) &D_80044904;
                     portal_max = *(coord3d *) &D_80044910;
                     portal_pts = g_BgPortals[portal_idx].offset_portal;
+#ifdef PORT
+                    if (!gePortalPointsCurrentlyAccepted(
+                            portal_pts,
+                            portal_pts != NULL ? portal_pts->numPoints : 0))
+                    {
+                        goto next_portal;
+                    }
+#endif
                     
                     for (j = 0; j < portal_pts->numPoints; j++)
                     {

@@ -10,12 +10,20 @@ extern "C" {
 /* Port-owned vector UI lifecycle. Commands are queued while the port overlay
  * builds its display list and rendered after the software RSP has flushed,
  * keeping OpenGL state out of the game display-list path. */
+void gfx_vector_text_begin_build(void);
+void gfx_vector_text_end_build(void);
 void gfx_vector_text_begin_frame(void);
 int gfx_vector_text_enabled(void);
 int gfx_vector_text_measure(const char *text);
 int gfx_vector_text_hud_width(const char *text, int fallback_width);
 int gfx_vector_text_hud_height(int fallback_height);
 int gfx_vector_text_queue(int x, int y, const char *text, uint32_t colour);
+/* Queue text into the render batch already selected for the current frame.
+ * Port overlays are emitted after the game display-list build has published
+ * its producer batch; using the ordinary queue here would put the text in a
+ * pending batch that the next game build can overwrite before draw. */
+int gfx_vector_text_queue_late(int x, int y, const char *text,
+                              uint32_t colour);
 int gfx_vector_text_queue_outlined(int x, int y, const char *text,
                                    uint32_t colour, uint32_t outline_colour);
 int gfx_vector_text_queue_hud(int x, int y, const char *text, int outlined);

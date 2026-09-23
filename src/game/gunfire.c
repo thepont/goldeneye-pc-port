@@ -42,6 +42,7 @@
 #include <stdio.h>
 #include "../../port/fast3d/vector_text.h"
 #include "sight_policy.h"
+#include "gunshot_audio_policy.h"
 extern void _Exit(int status);
 /* D102: the 1P weapon Model and its RW-data pool were punned onto
  * hand->field_B68 / hand->modeldatas; on x86-64 struct Model (0xE8) is too
@@ -3261,6 +3262,25 @@ void gunTickHandState(enum GUNHAND hand, s32 triggerOn)
             {
                 sp1B4 = 0;
 
+#ifdef PORT
+                {
+                    const u32 sound_trigger_rate =
+                        (u32) bondwalkItemGetSoundTriggerRate(var_s1);
+                    if (geGunshotSoundIsDue(
+                            (u32) g_GlobalTimer,
+                            (u32) handptr->field_A4C,
+                            (u32) g_CurrentPlayer->hands[1 - hand].field_A50,
+                            sound_trigger_rate,
+                            handptr->weapon_firing_status))
+                    {
+                        if (sound_trigger_rate > 0)
+                        {
+                            handptr->field_A4C = sound_trigger_rate + g_GlobalTimer;
+                        }
+                        sp1B4 = 1;
+                    }
+                }
+#else
                 if (bondwalkItemGetSoundTriggerRate(var_s1) > 0)
                 {
                     if ((g_CurrentPlayer->hands[1 - hand].field_A50 != g_GlobalTimer)
@@ -3274,6 +3294,7 @@ void gunTickHandState(enum GUNHAND hand, s32 triggerOn)
                 {
                     sp1B4 = 1;
                 }
+#endif
 
                 if ((getPlayerCount() == 1) || ((checkGamePaused() == 0) && (g_CurrentPlayer->mpmenuon == 0)))
                 {

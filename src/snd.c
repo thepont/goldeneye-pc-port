@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "audiotrace.h"   /* D202/M-70: serialized trace writer */
+#include "level_status_contract_policy.h"
 #endif
 //likely named gslibaudio.c from xbla
 /**
@@ -844,6 +845,15 @@ s32 sndCountAllocList(s16 *allocListCount, s16 *freeListCount)
 ALSoundState *sndSetupSound(struct ALBankAlt_s *soundBank, ALSound* sound)
 {
     s32 decayTimeFlag;
+#ifdef PORT
+    if (!geSoundSetupCurrentlyAccepted(
+            sound,
+            sound != NULL ? sound->keyMap : NULL,
+            sound != NULL ? sound->envelope : NULL))
+    {
+        return NULL;
+    }
+#endif
     ALKeyMap *keymap = sound->keyMap;
     ALSoundState *state = (ALSoundState *)D_800243E4.g_sndPlayerSoundStatePtr;
     OSIntMask mask;

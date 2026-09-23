@@ -20,10 +20,13 @@
  * check). Env-gated, harmless when unset.
  */
 
-#include <math.h>
+#include "port_math.h" /* real host lround declaration; <math.h> is an N64 stub */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The decomp's libc shim intentionally does not expose the host labs(). */
+extern long labs(long);
 
 #include <SDL.h>
 
@@ -126,11 +129,15 @@ static struct Row rows[] = {
     { "Video.FpsCap",             "Frame cap",        ROW_FPSCAP, 0,    NULL,       0, 0, 0,   0,0,0,0,0 },
     { "Video.RenderMode",         "Render mode",       ROW_ENUM,   1,    kRenderMode, 0, 0, 0,   0,0,0,0,0 },
     { "Video.DynamicLighting",    "Dynamic lighting", ROW_TOGGLE, 1,    kOnOff,     0, 0, 0,   0,0,0,0,0 },
+    { "Video.BumpMaps",           "Bump maps",        ROW_TOGGLE, 1,    kOnOff,     0, 0, 0,   0,0,0,0,0 },
     { "Video.MSAA",               "MSAA",             ROW_MSAA,   0,    NULL,       1, 0, 0,   0,0,0,0,0 },
     { "Video.TextureFilter",      "Texture filter",   ROW_ENUM,   1,    kTexFilter, 0, 0, 0,   0,0,0,0,0 },
+    { "Video.FixMipTextures",     "Fix mip textures", ROW_TOGGLE, 1,    kOnOff,     0, 0, 0,   0,0,0,0,0 },
+    { "Video.WrapFix",             "Texture wrap fix",ROW_TOGGLE, 1,    kOnOff,     0, 0, 0,   0,0,0,0,0 },
     { "Video.Anisotropy",         "Anisotropic",      ROW_SLIDER, 1,    NULL,       0, 0, 0,   0,0,0,0,0 },
     { "Video.PostFX",             "Adaptive sharpen", ROW_TOGGLE, 1,    kOnOff,     0, 0, 0,   0,0,0,0,0 },
     { "Video.Sharpen",            "Sharpness %",      ROW_SLIDER, 5,    NULL,       0, 0, 100,  0,0,0,0,0 },
+    { "Video.DepthOfField",        "Depth of field",   ROW_TOGGLE, 1,    kOnOff,     0, 0, 0,   0,0,0,0,0 },
     { "Video.FovScale",           "FOV scale %",      ROW_SLIDER, 5,    NULL,       0, 0, 0,   0,0,0,0,0 },
     { "Video.WidescreenAuto",     "Widescreen auto FOV",ROW_TOGGLE,1,   kOnOff,     0, 0, 0,   0,0,0,0,0 },
     { "Video.SafeAreaCrop",       "Crop overscan bars", ROW_TOGGLE,1,   kOnOff,     0, 0, 0,   0,0,0,0,0 },
@@ -169,6 +176,7 @@ static struct Row rows[] = {
     /* { "Input.SensLink",           "Link aim/turn sens",ROW_TOGGLE,1, kOnOff, 0, 0, 0, 0,0,0,0,0 }, */
     { "Input.MouseSensitivity",   "Mouse sensitivity",ROW_SLIDER, 5,    NULL,       0, 0, 0,   0,0,0,0,0 },
     { "Input.MouseInvertY",       "Mouse invert Y",   ROW_TOGGLE, 1,    kOnOff,     0, 0, 0,   0,0,0,0,0 },
+    { "Input.PadLookInvertY",     "Controller invert Y", ROW_TOGGLE, 1, kOnOff,     0, 0, 0,   0,0,0,0,0 },
     /* D181/Game.ScreenShakeIntensity: user testing (v0.2.1) found the slider
      * "basically useless" -- viShake() is only called from explosion.c, so it
      * scales explosion shake alone; it never touches the always-on walking
@@ -864,12 +872,9 @@ static void valueText(const struct Row *r, char *out, int n)
     snprintf(out, n, "%d", (int)lround(v));
 }
 
-static Gfx *drawText(Gfx *gdl, s32 x, s32 y, const char *str, u32 colour)
+static Gfx *drawBitmapText(Gfx *gdl, s32 x, s32 y, const char *str,
+                           u32 colour)
 {
-    if (gfx_vector_text_enabled() &&
-        gfx_vector_text_queue(x, y, str, colour)) {
-        return gdl;
-    }
     s32 px = x, py = y;
     /* width/height are the on-screen CLIP rect textRenderGlyph tests against
      * (clipX=start x, clipY=start y, +clipWidth/+clipHeight), NOT the text's
@@ -878,6 +883,15 @@ static Gfx *drawText(Gfx *gdl, s32 x, s32 y, const char *str, u32 colour)
      * the full 2D viewport, like bondview2.c's debug-text path. */
     return textRender(gdl, &px, &py, (char *)str, ptrFontBankGothicChars,
                       ptrFontBankGothic, colour, viGetX(), viGetY(), 0, 0);
+}
+
+static Gfx *drawText(Gfx *gdl, s32 x, s32 y, const char *str, u32 colour)
+{
+    if (gfx_vector_text_enabled() &&
+        gfx_vector_text_queue_late(x, y, str, colour)) {
+        return gdl;
+    }
+    return drawBitmapText(gdl, x, y, str, colour);
 }
 
 static s32 measureText(const char *str)
@@ -893,7 +907,37 @@ static s32 measureText(const char *str)
 /* Right-aligned: the string ends at xr. */
 static Gfx *drawTextR(Gfx *gdl, s32 xr, s32 y, const char *str, u32 colour)
 {
-    return drawText(gdl, xr - measureText(str), y, str, colour);
+    if (gfx_vector_text_enabled()) {
+        /* Try the vector path before choosing the origin. If its bounded
+         * current-frame batch is unavailable, the bitmap fallback must be
+         * positioned from bitmap metrics rather than the vector face's
+         * advance widths. */
+        s32 vector_x = xr - gfx_vector_text_measure(str);
+        if (gfx_vector_text_queue_late(vector_x, y, str, colour)) {
+            return gdl;
+        }
+    }
+
+    s32 h = 0, w = 0;
+    textMeasure(&h, &w, (char *)str, ptrFontBankGothicChars,
+                ptrFontBankGothic, 0);
+    return drawBitmapText(gdl, xr - w, y, str, colour);
+}
+
+static Gfx *drawTextCentered(Gfx *gdl, s32 center_x, s32 y,
+                             const char *str, u32 colour)
+{
+    if (gfx_vector_text_enabled()) {
+        s32 vector_x = center_x - measureText(str) / 2;
+        if (gfx_vector_text_queue_late(vector_x, y, str, colour)) {
+            return gdl;
+        }
+    }
+
+    s32 h = 0, w = 0;
+    textMeasure(&h, &w, (char *)str, ptrFontBankGothicChars,
+                ptrFontBankGothic, 0);
+    return drawBitmapText(gdl, center_x - w / 2, y, str, colour);
 }
 
 Gfx *optionsOverlayEmit(void)
@@ -987,8 +1031,8 @@ Gfx *optionsOverlayEmit(void)
     gdl = drawText(gdl, OV_X0, OV_TOP + OV_LINE,
                    "select: scroll/click, change: mouse/arrows",
                    0x8890a0ff);                                        /* hint line */
-    gdl = drawText(gdl, (OV_CB_X0 + OV_CB_X1) / 2 - measureText("X") / 2,
-                   OV_TOP, "X", 0xffffffff);                            /* close glyph */
+    gdl = drawTextCentered(gdl, (OV_CB_X0 + OV_CB_X1) / 2,
+                           OV_TOP, "X", 0xffffffff);                    /* close glyph */
 
     for (int p = s_scroll; p <= pLast; p++) {
         const struct Row *r = &rows[s_visIdx[p]];

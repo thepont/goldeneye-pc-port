@@ -455,11 +455,12 @@ void video_related_8(void)
 
     if (g_viColorOutputMode != COLORMODE_32BIT)
     {
-        ((struct GfxInfo_s *)g_gfxTaskSettingsList)->cfb = g_ViBackData->framebuf;
+        ((struct GfxInfo_s *)g_gfxTaskSettingsList)->cfb =
+            (uintptr_t)g_ViBackData->framebuf;
     }
     else
     {
-        ((struct GfxInfo_s *)g_gfxTaskSettingsList)->cfb = cfb_16[0];
+        ((struct GfxInfo_s *)g_gfxTaskSettingsList)->cfb = (uintptr_t)cfb_16[0];
     }
 
     settings = g_ViBackData;
@@ -599,11 +600,12 @@ void video_related_8(void)
 
     if (g_viColorOutputMode != (g_viColorOutputMode * 0))
     {
-        ((struct GfxInfo_s *)g_gfxTaskSettingsList)->cfb = g_ViBackData->framebuf;
+        ((struct GfxInfo_s *)g_gfxTaskSettingsList)->cfb =
+            (uintptr_t)g_ViBackData->framebuf;
     }
     else
     {
-        ((struct GfxInfo_s *)g_gfxTaskSettingsList)->cfb = cfb_16[0];
+        ((struct GfxInfo_s *)g_gfxTaskSettingsList)->cfb = (uintptr_t)cfb_16[0];
     }
 
     settings = g_ViBackData;

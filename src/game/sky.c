@@ -3,6 +3,7 @@
 #ifdef PORT
 #include <stdio.h>
 #include <stdlib.h>
+#include "sky_water_policy.h"
 #endif
 #include "sky.h"
 #include "player.h"
@@ -16,6 +17,7 @@
 #include "image_bank.h"
 #ifdef PORT
 #include "dyn.h"
+#include "gfx_water_material_api.h"
 #endif
 
 #define SKYABS(val) (val >= 0.0f ? (val) : -(val))
@@ -24,7 +26,7 @@
 /* D227 (M-95): forward decls -- the two fan-drawing blocks that call these
  * (further down this file) come before the static definitions themselves.
  * See the comment above skyPortBeginFan()'s definition. */
-static void skyPortBeginFan(SkyRelated38 *v, s32 n, bool allowShift);
+static void skyPortBeginFan(SkyRelated38 *v, s32 n, bool allowShift, bool water);
 static void skyPortEndFan(void);
 /* D245 (M-142): same reason -- the water call site (further down) needs to
  * override the adaptive shift picked by skyPortBeginFan() before the
@@ -35,7 +37,7 @@ static void skyPortCaptureTile(Gfx *start, Gfx *end);
 /* D227 (M-100): relocated up here (was just above skyPortPickShift, further
  * down) so the D245 water call site's GE_D245_FIXEDSHIFT clamp can use it --
  * same forward-declare reason as the functions above. */
-#define SKY_TC_MAX_SHIFT 5
+#define SKY_TC_MAX_SHIFT GE_SKY_TC_MAX_SHIFT
 #endif
 
 // bss
@@ -886,7 +888,16 @@ Gfx *skyRender(Gfx *gdl)
             }
         }
 
-        if (!fogGetCurrentEnvironmentp()->IsWater)
+#ifdef PORT
+        /* Enhanced/remaster water is rendered from a physical world surface
+         * after opaque level geometry. Keep this projected fan only as the
+         * Original-mode compatibility path. */
+        const bool useLegacyWaterFan = !gfx_water_world_surface_enabled();
+#else
+        const bool useLegacyWaterFan = TRUE;
+#endif
+
+        if (!fogGetCurrentEnvironmentp()->IsWater || !useLegacyWaterFan)
         {
             f32 f14 = 1279.0f;
             f32 f2 = 0.0f;
@@ -937,7 +948,8 @@ Gfx *skyRender(Gfx *gdl)
              * the tc-shift safety valve on the water quad too -- see the
              * comment above skyPortBeginFan() for why this doesn't flatten
              * the cross-fade. */
-            skyPortBeginFan(sp274, s1, TRUE); /* water: see skyPortBeginFan */
+            gdl = gfx_emit_water_material(gdl, TRUE);
+            skyPortBeginFan(sp274, s1, TRUE, TRUE); /* water: see skyPortBeginFan */
 
             /* D245 (M-142): opt-in A/B candidate -- see skyPortForceFanShift's
              * comment. Off by default (unset env => identical to the current
@@ -1002,6 +1014,7 @@ Gfx *skyRender(Gfx *gdl)
             }
 #ifdef PORT
             skyPortEndFan();
+            gdl = gfx_emit_water_material(gdl, FALSE);
 #endif
         }
     }
@@ -1435,7 +1448,7 @@ Gfx *skyRender(Gfx *gdl)
         /* D227 (M-95): one shared wScale for every triangle drawn from this
          * sp94[] fan -- see skyPortBeginFan() above. Computed from unk0c,
          * which none of the position overrides below touch. */
-        skyPortBeginFan(sp94, s1, TRUE);
+        skyPortBeginFan(sp94, s1, TRUE, FALSE);
 #endif
         if (s1 == 4)
         {
@@ -1674,10 +1687,13 @@ static bool s_skyFanFoldSet = FALSE;
 
 /* One tile period expressed in unk20/unk24's units: 64 texels * 32 = 2048.
  * The fold must be a whole number of these or the rebase shifts the texture. */
-#define SKY_TC_WRAP 2048
+#define SKY_TC_WRAP GE_SKY_TC_WRAP
 
 static s32 s_skyFanShiftS = 0;
 static s32 s_skyFanShiftT = 0;
+static GeSkyWaterShiftState s_skyWaterShiftS = {};
+static GeSkyWaterShiftState s_skyWaterShiftT = {};
+static s32 s_skyWaterStage = -1;
 
 /*
  * Applying the shift means re-emitting the render tile's G_SETTILE with only
@@ -1767,13 +1783,7 @@ static Gfx *skyPortEmitTileShift(Gfx *gdl, s32 kS, s32 kT)
  * returns 0 -- see the unit note above, the coordinates fit unaided. */
 static s32 skyPortPickShift(f32 span)
 {
-    s32 k;
-    for (k = 0; k < SKY_TC_MAX_SHIFT; k++)
-    {
-        if ((span + (f32) SKY_TC_WRAP) / (f32) (1 << k) <= 32767.0f)
-            break;
-    }
-    return k;
+    return (s32) geSkyWaterPickShift(span);
 }
 
 /*
@@ -1802,7 +1812,7 @@ static s32 skyPortPickShift(f32 span)
  * / pulsating, now FIXED) and that was NOT caused by any of this -- it
  * reproduced identically on main with none of the D227 work present.
  */
-static void skyPortBeginFan(SkyRelated38 *v, s32 n, bool allowShift)
+static void skyPortBeginFan(SkyRelated38 *v, s32 n, bool allowShift, bool water)
 {
     f32 maxAbsW = 0.0f;
     f32 minS, minT, maxS, maxT;
@@ -1827,8 +1837,21 @@ static void skyPortBeginFan(SkyRelated38 *v, s32 n, bool allowShift)
     s_skyFanFoldT = (f32) ((s32) floorf(minT / (f32) SKY_TC_WRAP) * SKY_TC_WRAP);
     s_skyFanFoldSet = TRUE;
 
-    s_skyFanShiftS = allowShift ? skyPortPickShift(maxS - minS) : 0;
-    s_skyFanShiftT = allowShift ? skyPortPickShift(maxT - minT) : 0;
+    if (water && s_skyWaterStage != g_SkyStageNum) {
+        geSkyWaterShiftReset(&s_skyWaterShiftS);
+        geSkyWaterShiftReset(&s_skyWaterShiftT);
+        s_skyWaterStage = g_SkyStageNum;
+    }
+
+    if (water && allowShift) {
+        s_skyFanShiftS = geSkyWaterPickShiftHysteretic(
+            &s_skyWaterShiftS, maxS - minS);
+        s_skyFanShiftT = geSkyWaterPickShiftHysteretic(
+            &s_skyWaterShiftT, maxT - minT);
+    } else {
+        s_skyFanShiftS = allowShift ? skyPortPickShift(maxS - minS) : 0;
+        s_skyFanShiftT = allowShift ? skyPortPickShift(maxT - minT) : 0;
+    }
 }
 
 static void skyPortEndFan(void)

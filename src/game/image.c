@@ -6,6 +6,9 @@
 #include <PR/R4300.h>
 #include "ramrom.h"
 #include "decompress.h"
+#ifdef PORT
+#include <gfx_api.h>
+#endif
 
 
 #define TEX_ALPHA_WEIGHT 961
@@ -223,7 +226,11 @@ s32 texInflateZlib(u8 *src, u8 *dst, s32 arg2, s32 forcenumimages, struct texpoo
     totalbytesout = 0;
     writetocache = FALSE;
 
+#ifdef PORT
+    texSetBitstring((uintptr_t)src);
+#else
     texSetBitstring(src);
+#endif
 
     if (arg2 && forcenumimages)
     {
@@ -414,7 +421,14 @@ s32 texAlignIndices(u8 *src, s32 width, s32 height, s32 format, u8 *dst)
             src++;
         }
 
+#ifdef PORT
+        /* The destination is a host pointer on the PC port.  Narrowing it to
+         * the N64 u32 address type can move the next row to unmapped low
+         * memory as soon as a texture buffer lives above 4 GiB. */
+        outptr = (u8 *)(((uintptr_t)outptr + 7) & ~(uintptr_t)7);
+#else
         outptr = (u8 *)(((u32)outptr + 7) & ~7);
+#endif
     }
 
     return outptr - dst;
@@ -912,7 +926,11 @@ s32 texInflateNonZlib(u8 *src, u8 *dst, s32 arg2, s32 forcenumimages, struct tex
     u8 *end;
     s32 writetocache = FALSE;
 
+#ifdef PORT
+    texSetBitstring((uintptr_t)src);
+#else
     texSetBitstring(src);
+#endif
 
     numimages = arg2 && forcenumimages ? forcenumimages : 1;
 
@@ -1739,9 +1757,15 @@ void texReadAlphaBits(u8 *image,s32 count)
  */
 s32 texReadUncompressed(u8 *dst, s32 width, s32 height, s32 format)
 {
+#ifdef PORT
+	u32 *dst32 = (u32 *)(((uintptr_t)dst + 0xf) & ~(uintptr_t)0xf);
+	u16 *dst16 = (u16 *)(((uintptr_t)dst + 7) & ~(uintptr_t)7);
+	u8 *dst8 = (u8 *)(((uintptr_t)dst + 7) & ~(uintptr_t)7);
+#else
 	u32 *dst32 = (u32 *)(((u32)dst + 0xf) & ~0xf);
 	u16 *dst16 = (u16 *)(((u32)dst + 7) & ~7);
 	u8 *dst8 = (u8 *)(((u32)dst + 7) & ~7);
+#endif
 	s32 x;
 	s32 y;
 
@@ -2242,11 +2266,19 @@ s32 texInflateLookupFromBuffer(u8 *src, s32 width, s32 height, u8 *dst, u8 *look
                 {
                     if (numcolours <= 256)
                     {
-                        dst8[x >> 1] = lookup16[src8[x]] << 4 | lookup16[src8[x + 1]];
+                        dst8[x >> 1] = lookup16[src8[x]] << 4;
+                        if (x + 1 < width)
+                        {
+                            dst8[x >> 1] |= lookup16[src8[x + 1]];
+                        }
                     }
                     else
                     {
-                        dst8[x >> 1] = lookup16[src16[x]] << 4 | lookup16[src16[x + 1]];
+                        dst8[x >> 1] = lookup16[src16[x]] << 4;
+                        if (x + 1 < width)
+                        {
+                            dst8[x >> 1] |= lookup16[src16[x + 1]];
+                        }
                     }
                 }
 
@@ -2612,6 +2644,18 @@ void texLoad(s32 *updateword, struct texpool *pool)
     }
 
     *updateword = osVirtualToPhysical(tex->data);
+#ifdef PORT
+    /* The renderer sees the decompressed pool address, not the original
+     * IMAGESEG address used by the offline bump-map manifest. Preserve the
+     * source identity at the point where texLoad still knows both values. */
+    {
+        const u32 image_offset =
+            *((s32 *)&g_Textures[g_TexNumToLoad]) & 0xFFFFFF;
+        const u8 *image_rom_address =
+            (const u8 *)((uintptr_t)&_imagesSegmentRomStart + image_offset);
+        gfx_register_texture_source(tex->data, image_rom_address);
+    }
+#endif
 }
 
 

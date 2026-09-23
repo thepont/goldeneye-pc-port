@@ -14,6 +14,7 @@
 #ifdef PORT
 #include <stdio.h>
 #include <stdlib.h>
+#include "gfx_relocation_policy.h"
 #include "pcmodels.h" /* D50: PC-layout model sidecars (Plan B, D48/D49) */
 #include "pccg.h"     /* D69: PC-layout bg/stan sidecars */
 extern resource_lookup_data_entry resource_lookup_data_array[]; /* ob.c */
@@ -38,8 +39,18 @@ void sub_GAME_7F0762E0(ModelFileHeader *objheader, u8 *name, u8 *dst, struct tex
     s32 delta;
     s32 filedata;
     s32 filenum;
+#ifdef PORT
+    u8 *filedataptr;
+#endif
 
     filedata = (s32) objheader->Switches;
+#ifdef PORT
+    /* The arithmetic above intentionally retains the original 32-bit model
+     * offsets.  The allocation passed back to the PC memory pool must retain
+     * its full host pointer, however; truncating it makes compaction unable
+     * to identify the most recent allocation on x86-64. */
+    filedataptr = (u8 *)objheader->Switches;
+#endif
     filenum = fileGetIndex((char *) name);
 
     romremaining = get_rom_remaining_buffer_for_index(filenum);
@@ -49,14 +60,17 @@ void sub_GAME_7F0762E0(ModelFileHeader *objheader, u8 *name, u8 *dst, struct tex
 
     if (gdl != 0)
     {
-        name = (u8 *) ((pcremaining - ((s32) (((u8 *) objheader->Switches) + (((u32) gdl) & 0x00ffffff)))) + ((s32) filedata));
+        name = (u8 *) (pcremaining -
+                       (s32)(((u8 *)objheader->Switches) +
+                             geGfxRelocationOffset((u32)gdl)) +
+                       (s32)filedata);
         
         /* The signed lvalue cast is required for the compiler to choose the target registers. */
         replacementgdl = (u32)*(s32 *)&gdl;
         
-        delta = ((s32) ((romremaining + filedata) - (s32) name)) - ((s32) (((u8 *) objheader->Switches) + (((u32) gdl) & 0x00ffffff)));
+        delta = ((s32) ((romremaining + filedata) - (s32) name)) - ((s32) (((u8 *) objheader->Switches) + geGfxRelocationOffset((u32)gdl)));
         
-        texCopyGdls((Gfx *) (((u8 *) objheader->Switches) + (((u32) gdl) & 0x00ffffff)), (Gfx *) ((romremaining + filedata) - (s32) name), (s32) name);
+        texCopyGdls((Gfx *) (((u8 *) objheader->Switches) + geGfxRelocationOffset((u32)gdl)), (Gfx *) ((romremaining + filedata) - (s32) name), (s32) name);
 
         texLoadFromModelFileHeader(objheader, buffer);
 
@@ -74,19 +88,25 @@ void sub_GAME_7F0762E0(ModelFileHeader *objheader, u8 *name, u8 *dst, struct tex
                 }
                 else
                 {
-                    name = (u8 *) ((((s32) (filedata + pcremaining)) - ((s32) objheader->Switches)) - (((u32) curgdl) & 0x00ffffff));
+                    name = (u8 *) ((((s32) (filedata + pcremaining)) - ((s32) objheader->Switches)) - geGfxRelocationOffset((u32)curgdl));
                 }
                 
                 modelNodeReplaceGdl((u32) objheader, curnode, curgdl, (Gfx *) replacementgdl);
                 
-                replacementgdl += texLoadFromGdl( (Gfx *) ((((u8 *) objheader->Switches) + (((u32) curgdl) & 0x00ffffff)) + delta), (s32) name, (Gfx *) (((u8 *) objheader->Switches) + (replacementgdl & 0x00ffffff)), buffer);
+                replacementgdl += texLoadFromGdl( (Gfx *) ((((u8 *) objheader->Switches) + geGfxRelocationOffset((u32)curgdl)) + delta), (s32) name, (Gfx *) (((u8 *) objheader->Switches) + geGfxRelocationOffset(replacementgdl)), buffer);
             } 
             while (node != 0);
         }
 
-        name = (u8 *) (((s32) (((u8 *) objheader->Switches) + (replacementgdl & 0x00ffffff))) - filedata);
+        name = (u8 *) (((s32) (((u8 *) objheader->Switches) + geGfxRelocationOffset(replacementgdl))) - filedata);
 
-        fileSetSize(filenum, (u8 *) filedata, (((s32) name + 0xf) & (~0xf)), dst == 0);
+#ifdef PORT
+        fileSetSize(filenum, filedataptr,
+                    (((s32) name + 0xf) & (~0xf)), dst == 0);
+#else
+        fileSetSize(filenum, (u8 *) filedata,
+                    (((s32) name + 0xf) & (~0xf)), dst == 0);
+#endif
     }
 }
 
@@ -147,7 +167,7 @@ void load_object_fill_header(struct ModelFileHeader *objheader, u8 *name, u8* ds
         fflush(stderr);
     }
 #endif
-    sub_GAME_7F075A90(objheader, 0x5000000, filedata);
+    sub_GAME_7F075A90(objheader, 0x5000000, (uintptr_t)filedata);
     sub_GAME_7F0762E0(objheader, name, dst, buffer);
 }
 
@@ -166,8 +186,4 @@ void load_object_into_memory_unused_maybe(struct ModelFileHeader *header,int *re
    load_object_fill_header(header,recallstring,targetloc,sizeleft,0);
    return;
 }
-
-
-
-
 

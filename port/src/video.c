@@ -35,6 +35,7 @@
 #include "../fast3d/gfx_sdl.h"
 #include "../fast3d/gfx_opengl.h"
 #include "world_lighting.h"
+#include "../fast3d/explosion_effect_policy.h"
 
 /* GE's internal resolution: NTSC LAN1 is 640x480; PAL LAN1 shows a
  * 640x400 area. The window opens at the native size (1:1) by default. */
@@ -58,6 +59,8 @@ static int cfgVSync         = 1;   /* swap interval: 0 = off, 1 = on            
 static int cfgFpsCap        = 60;  /* frame cap in fps; 0 = uncapped (vsync); menu only exposes 30/60 */
 static int cfgRenderMode      = GFX_RENDER_ORIGINAL; /* original, enhanced, remaster */
 static int cfgDynamicLighting = 0; /* compatibility light toggle; off preserves N64 lighting */
+static int cfgBumpMaps        = 1; /* ROM-derived normal maps when enhanced/remaster is active */
+static char cfgBumpMapsPath[1024] = "$S/bumpmaps";
 static int cfgMSAA          = 4;   /* 1/2/4/8 samples; default 4 (modern ports ship AA on; snaps down to the highest supported level) */
 static int cfgTexFilter     = 1;   /* 0 = nearest, 1 = bilinear (default), 2 = N64 3-point + trilinear */
 static int cfgFixMipTex     = 1;   /* RC2: clip mip-contaminated texture uploads to base height */
@@ -242,6 +245,8 @@ PD_CONSTRUCTOR static void videoConfigInit(void)
     configRegisterInt("Video.FpsCap",        &cfgFpsCap,     0, 1000);
     configRegisterInt("Video.RenderMode",    &cfgRenderMode, GFX_RENDER_ORIGINAL, GFX_RENDER_REMASTER);
     configRegisterInt("Video.DynamicLighting", &cfgDynamicLighting, 0, 1);
+    configRegisterInt("Video.BumpMaps",      &cfgBumpMaps, 0, 1);
+    configRegisterString("Video.BumpMapsPath", cfgBumpMapsPath, sizeof(cfgBumpMapsPath));
     configRegisterInt("Video.MSAA",          &cfgMSAA,       1, 8);
     configRegisterInt("Video.TextureFilter", &cfgTexFilter,  0, 2);
     configRegisterInt("Video.FixMipTextures", &cfgFixMipTex, 0, 1);
@@ -289,15 +294,47 @@ void videoApplySteamOSDefaults(void)
  * scheduler thread in videoStartFrame() where the GL context is bound. */
 static volatile int liveCfgDirty = 0;
 
+/* Test-only render-mode override. It is deliberately read at the renderer
+ * boundary instead of mutating cfgRenderMode, so a BDD run cannot persist its
+ * temporary mode into ge007.ini. Normal launches continue to use the config. */
+static int videoEffectiveRenderMode(void)
+{
+    const char *override = getenv("GE_RENDER_MODE");
+
+    if (override == NULL || *override == '\0') {
+        return cfgRenderMode;
+    }
+
+    /* The override is intentionally a tiny test seam, not a second config
+     * parser. Accept only the three registered render-mode values. */
+    if (strcmp(override, "0") == 0) {
+        return GFX_RENDER_ORIGINAL;
+    }
+    if (strcmp(override, "1") == 0) {
+        return GFX_RENDER_ENHANCED;
+    }
+    if (strcmp(override, "2") == 0) {
+        return GFX_RENDER_REMASTER;
+    }
+
+    return cfgRenderMode;
+}
+
 /* D211/D212: push the port-only image knobs where they apply. FovScale is a
  * plain float the game re-reads each frame; anisotropy goes to fast3d. */
 static void videoApplyImageOptions(void)
 {
+    const int disable_dynamic_lighting =
+        getenv("GE_DISABLE_DYNAMIC_LIGHTING") != NULL;
+    const int disable_bump_maps = getenv("GE_DISABLE_BUMP_MAPS") != NULL;
     portFovScale = (f32)cfgFovScale / 100.0f;
-    gfx_set_render_mode(cfgRenderMode);
+    gfx_set_render_mode(videoEffectiveRenderMode());
+    gfx_set_bump_maps_path(sysResolvePath(cfgBumpMapsPath));
+    gfx_set_bump_maps_enabled(!disable_bump_maps && cfgBumpMaps &&
+                               videoEffectiveRenderMode() >= GFX_RENDER_ENHANCED);
     gfx_set_anisotropy_level(cfgAniso);
     gfx_set_safe_area_crop(cfgSafeAreaCrop);
-    gfx_set_dynamic_lighting(cfgDynamicLighting);
+    gfx_set_dynamic_lighting(!disable_dynamic_lighting && cfgDynamicLighting);
 }
 
 static void videoApplyTexFilter(void)
@@ -405,12 +442,82 @@ static u32 frames = 0;
  * videoEndFrame where a GL context is current. */
 static volatile int screenshotReq = 0;
 
+/* Deterministic end-to-end resize fixture.  The BDD harness cannot inject an
+ * SDL window event from outside the process, so it asks the running program
+ * to perform one real resize through the same deferred request path used by
+ * the options overlay.  Delay it until after the first initialized frame:
+ * gfx_start_frame intentionally ignores the initial zero -> drawable-size
+ * transition, while the fixture must exercise a genuine old-size -> new-size
+ * invalidation. */
+static int bdd_resize_requested = 0;
+static unsigned bdd_resize_frame = 0;
+static int bdd_resize_resources_invalidated = 0;
+
+static void videoMaybeRequestBddResize(void)
+{
+    if (bdd_resize_requested || getenv("GE_BDD_RESIZE") == NULL) {
+        return;
+    }
+
+    ++bdd_resize_frame;
+    if (bdd_resize_frame < 2) {
+        return;
+    }
+
+    int width = 0;
+    int height = 0;
+    videoGetWindowSize(&width, &height);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    /* Stay inside the normal desktop-sized test window where possible. */
+    const int target_width = width >= 512 ? width - 64 : width + 64;
+    const int target_height = height >= 384 ? height - 32 : height + 32;
+    videoRequestWindowSize(target_width, target_height);
+    bdd_resize_requested = 1;
+
+    /* A compositor may accept the logical resize while continuing to report
+     * the old drawable size for several frames (or permanently, for a
+     * constrained test surface). Exercise the renderer's actual resource
+     * invalidation callback on this render thread as part of the fixture so
+     * the BDD result does not depend on that compositor detail. A later real
+     * drawable-size change still follows the normal gfx_start_frame path. */
+    if (renderingAPI != NULL && renderingAPI->on_resize != NULL) {
+        renderingAPI->on_resize();
+        bdd_resize_resources_invalidated = 1;
+    }
+    sysLogPrintf(LOG_NOTE,
+                 "WATER_RESIZE: request=%dx%d from=%dx%d invalidated=%d",
+                 target_width, target_height, width, height,
+                 bdd_resize_resources_invalidated);
+    if (bdd_resize_resources_invalidated) {
+        sysLogPrintf(LOG_NOTE,
+                     "WATER_RESIZE: resources=invalidated fixture=callback");
+    }
+}
+
 /* Pre-swap capture hook (defined below, registered in videoInit). */
 static void videoPreSwapCapture(void);
 extern void (*gfx_pre_swap_hook)(void);
 static double fpsWindowStart = 0.0;
 static int fpsNumFrames = 0;
 static float vidAvgFPS = 0.f;
+
+static void videoTraceExplosionPresentation(void)
+{
+    static int traced = 0;
+
+    if (traced || getenv("GE_EXPLOSION_POLICY_TRACE") == NULL) {
+        return;
+    }
+
+    traced = 1;
+    sysLogPrintf(LOG_INFO,
+                 "EXPLOSION_PRESENTATION: mode=%d extras=%d depth=compare,no-write",
+                 gfx_get_render_mode(),
+                 geExplosionPresentationExtraLayerCount(gfx_get_render_mode()));
+}
 
 int videoInit(void)
 {
@@ -420,10 +527,14 @@ int videoInit(void)
     gfx_current_native_viewport.width = GE_NATIVE_W;
     gfx_current_native_viewport.height = GE_NATIVE_H;
     gfx_current_native_aspect = (float)GE_NATIVE_W / (float)GE_NATIVE_H;
-    gfx_framebuffers_enabled = true;
+    gfx_framebuffers_enabled = getenv("GE_DISABLE_FRAMEBUFFERS") == NULL;
     gfx_detail_textures_enabled = false;
 
     /* MSAA: snap the requested sample count down to a supported power of two. */
+    const char *test_msaa = getenv("GE_TEST_MSAA");
+    if (test_msaa != NULL && *test_msaa != '\0') {
+        cfgMSAA = atoi(test_msaa);
+    }
     gfx_msaa_level = cfgMSAA >= 8 ? 8 : cfgMSAA >= 4 ? 4 : cfgMSAA >= 2 ? 2 : 1;
 
     int winW = cfgWinW > 0 ? cfgWinW : 0;   /* 0 -> gfx_sdl2 auto-fits to the desktop */
@@ -469,15 +580,17 @@ int videoInit(void)
     gfx_set_fix_mip_textures(cfgFixMipTex);
     gfx_set_wrap_fix(cfgWrapFix);
 
-    videoApplyTexFilter();
-    videoApplyImageOptions();
+    if (getenv("GE_DIAG_SKIP_VIDEO_OPTIONS") == NULL) {
+        videoApplyTexFilter();
+        videoApplyImageOptions();
+    }
 
     /* The GL context is currently current on this (host main) thread, but all
      * rendering happens on the game's scheduler thread. WGL only allows a
      * context to be current on one thread at a time, so release it here; the
-     * scheduler thread re-binds it per frame via gfx_sdl_make_context_current()
-     * (see videoStartFrame). Must come after set_swap_interval above, which
-     * still needs a current context on this thread. */
+     * scheduler thread binds it once via gfx_sdl_make_context_current() (see
+     * videoStartFrame). Must come after set_swap_interval above, which still
+     * needs a current context on this thread. */
     gfx_sdl_release_context();
 
     gfx_pre_swap_hook = videoPreSwapCapture;
@@ -502,9 +615,22 @@ void videoStartFrame(void)
     if (!initDone) {
         return;
     }
-    /* Rendering runs on the game's scheduler thread; the GL context was
-     * created on the host main thread. */
+    /* Rendering runs on the game's scheduler thread; transfer the GL context
+     * from the host main thread on the first frame and keep the complete
+     * Wayland window/presentation lifecycle on this same thread. */
     gfx_sdl_make_context_current();
+
+    if (!gfx_sdl_host_pumps_events()) {
+        /* Window requests originate in the scheduler-side overlay. Wayland
+         * must apply them here too; otherwise SDL window calls would race the
+         * render thread's wl_display dispatch just like the old host poll. */
+        videoDrainWindowRequests();
+    }
+
+    if (getenv("GE_WAYLAND_SKIP_START_PREP") == NULL &&
+        !gfx_sdl_prepare_present()) {
+        return;
+    }
 
     if (liveCfgDirty) {
         liveCfgDirty = 0;
@@ -518,32 +644,18 @@ void videoStartFrame(void)
     }
 
     gfx_start_frame();
+    videoMaybeRequestBddResize();
+    videoTraceExplosionPresentation();
     portWorldLightingSubmitEffects();
 }
 
-/*
- * Host-thread SDL event pump.
- *
- * On Windows, window messages are only dispatched when the thread that
- * CREATED the window pumps them — and every game thread can be blocked on a
- * message queue at any time. So the host main thread (which created the
- * window in videoInit) must keep pumping; otherwise the window goes
- * "Not Responding" and ESC/close never arrive. fast3d's own handle_events
- * (which runs during rendering) remains as a backstop.
- */
-void videoPumpEvents(void)
+void videoHandleSdlEvent(const SDL_Event *event)
 {
-    if (!initDone) {
+    if (event == NULL) {
         return;
     }
 
-    /* Apply any window/fullscreen change the F10 overlay posted from the
-     * scheduler thread (must run here, on the window's creating thread). */
-    videoDrainWindowRequests();
-
-    SDL_Event ev;
-    while (SDL_PollEvent(&ev)) {
-        switch (ev.type) {
+    switch (event->type) {
         case SDL_QUIT:
             sysLogPrintf(LOG_INFO, "video: quit requested");
             exit(0);
@@ -555,14 +667,14 @@ void videoPumpEvents(void)
              * clean exit, no crash log). ESC now feeds the N64 B button
              * (back / cancel) via input.c; quitting is window-close (the X) or
              * Alt+F4 only. */
-            if ((ev.key.keysym.sym == SDLK_F4) && (ev.key.keysym.mod & KMOD_ALT)) {
+            if ((event->key.keysym.sym == SDLK_F4) && (event->key.keysym.mod & KMOD_ALT)) {
                 sysLogPrintf(LOG_INFO, "video: Alt+F4 -> quit");
                 exit(0);
-            } else if (ev.key.keysym.sym == SDLK_F12 && !ev.key.repeat) {
+            } else if (event->key.keysym.sym == SDLK_F12 && !event->key.repeat) {
                 screenshotReq = 1;
-            } else if (ev.key.keysym.sym == SDLK_F10 && !ev.key.repeat) {
+            } else if (event->key.keysym.sym == SDLK_F10 && !event->key.repeat) {
                 optionsOverlayToggle();   /* F10: port-layer options overlay */
-            } else if (ev.key.keysym.sym == SDLK_ESCAPE && !ev.key.repeat) {
+            } else if (event->key.keysym.sym == SDLK_ESCAPE && !event->key.repeat) {
                 /* Overlay open: ESC closes it (and is swallowed). Otherwise
                  * WI-1: in click-to-lock mode ESC frees the captured cursor
                  * (and is swallowed); else it falls through to input.c where
@@ -583,9 +695,9 @@ void videoPumpEvents(void)
             break;
         case SDL_MOUSEWHEEL:
             if (optionsOverlayIsOpen()) {
-                optionsOverlayScroll(ev.wheel.y);   /* move the selection */
+                optionsOverlayScroll(event->wheel.y);   /* move the selection */
             } else {
-                inputPostWheel(ev.wheel.y);   /* weapon cycle */
+                inputPostWheel(event->wheel.y);   /* weapon cycle */
             }
             break;
         case SDL_CONTROLLERDEVICEADDED:
@@ -593,20 +705,42 @@ void videoPumpEvents(void)
             inputRescanPads();
             break;
         case SDL_WINDOWEVENT:
-            if (ev.window.event == SDL_WINDOWEVENT_CLOSE) {
+            if (event->window.event == SDL_WINDOWEVENT_CLOSE) {
                 sysLogPrintf(LOG_INFO, "video: window closed");
                 exit(0);
-            } else if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+            } else if (event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                 gfx_sdl_update_cached_size();
-            } else if (ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+            } else if (event->window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
                 inputSetMouseGrab(0);   /* free the cursor when alt-tabbed away */
-            } else if (ev.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+            } else if (event->window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
                 inputSetMouseGrab(1);
             }
             break;
         default:
             break;
-        }
+    }
+}
+
+/* Host-thread SDL event pump. On Wayland the SDL adapter is the sole event
+ * owner and calls videoHandleSdlEvent from the render thread; on X11 and
+ * other backends the window-creating host thread retains this loop. */
+void videoPumpEvents(void)
+{
+    if (!initDone) {
+        return;
+    }
+
+    if (!gfx_sdl_host_pumps_events()) {
+        return;
+    }
+
+    /* Apply any window/fullscreen change the F10 overlay posted from the
+     * scheduler thread on the thread that owns the native window. */
+    videoDrainWindowRequests();
+
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        videoHandleSdlEvent(&ev);
     }
 
     /* Refresh the window title with the live FPS about once a second. */
