@@ -2,91 +2,22 @@
 #define GE007_WATER_PIXEL_ORACLE_H
 
 /* Small, dependency-free image metrics shared by the CPU water harness and
- * the display-backed water BDD.  These measure relationships in a generated
- * image; they do not depend on a GL context or a game/ROM process. */
+ * display-backed water BDD. They do not depend on a GL context or game/ROM. */
+
+#include "rgb_image.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstdint>
-#include <fstream>
-#include <limits>
 #include <string>
 #include <vector>
 
 namespace geWaterPixelOracle {
 
-struct Image {
-    int width = 0;
-    int height = 0;
-    std::vector<std::uint8_t> pixels;
-};
-
-inline bool next_token(std::istream &input, std::string &token)
-{
-    token.clear();
-    char ch = 0;
-    while (input.get(ch)) {
-        if (std::isspace(static_cast<unsigned char>(ch))) {
-            continue;
-        }
-        if (ch == '#') {
-            input.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            continue;
-        }
-        token.push_back(ch);
-        break;
-    }
-    while (input.get(ch) && !std::isspace(static_cast<unsigned char>(ch))) {
-        token.push_back(ch);
-    }
-    return !token.empty();
-}
-
-inline bool load_ppm(const std::string &path, Image &image)
-{
-    std::ifstream input(path, std::ios::binary);
-    if (!input) return false;
-    std::string magic, width, height, max_value;
-    if (!next_token(input, magic) || magic != "P6" ||
-        !next_token(input, width) || !next_token(input, height) ||
-        !next_token(input, max_value)) {
-        return false;
-    }
-    image.width = std::stoi(width);
-    image.height = std::stoi(height);
-    if (image.width <= 0 || image.height <= 0 || max_value != "255") {
-        return false;
-    }
-    image.pixels.resize(static_cast<std::size_t>(image.width) * image.height * 3);
-    input.read(reinterpret_cast<char *>(image.pixels.data()),
-               static_cast<std::streamsize>(image.pixels.size()));
-    return input.gcount() == static_cast<std::streamsize>(image.pixels.size());
-}
-
-inline bool write_ppm(const std::string &path, const Image &image)
-{
-    if (image.width <= 0 || image.height <= 0 ||
-        image.pixels.size() != static_cast<std::size_t>(image.width) *
-            image.height * 3) {
-        return false;
-    }
-    std::ofstream output(path, std::ios::binary);
-    if (!output) return false;
-    output << "P6\n" << image.width << ' ' << image.height << "\n255\n";
-    output.write(reinterpret_cast<const char *>(image.pixels.data()),
-                 static_cast<std::streamsize>(image.pixels.size()));
-    return output.good();
-}
-
-inline float luma(const Image &image, int x, int y)
-{
-    const std::size_t offset =
-        (static_cast<std::size_t>(y) * image.width + x) * 3;
-    return (0.2126f * image.pixels[offset] +
-            0.7152f * image.pixels[offset + 1] +
-            0.0722f * image.pixels[offset + 2]) / 255.0f;
-}
+using geTestImage::Image;
+using geTestImage::load_ppm;
+using geTestImage::luma;
+using geTestImage::write_ppm;
 
 inline float roi_variance(const Image &image, int top, int bottom)
 {

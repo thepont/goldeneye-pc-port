@@ -569,6 +569,178 @@ static void test_inventory_cycle_and_weapon_history(void)
                "weapon history replaces the least-used full history slot");
 }
 
+static void GivenAllGunsAndSinglePlayer_WhenCyclingForward_ThenAvailableDualWeaponIsSelected(void)
+{
+    s32 right;
+    s32 left;
+
+    /* Arrange */
+    reset_fixture();
+    player_fixture.equipallguns = TRUE;
+    dual_wield_weapon = ITEM_WPPK;
+    bondinvAddInvItem(ITEM_AK47);
+    right = ITEM_WPPK;
+    left = ITEM_UNARMED;
+
+    /* Act */
+    bondinvCycleForward(&right, &left, FALSE);
+
+    /* Assert */
+    expect_true(right == ITEM_WPPK && left == ITEM_WPPK,
+                "single-player all-guns cycling selects an available dual weapon");
+}
+
+static void GivenAllGunsAndMultiplayer_WhenCyclingForward_ThenDualWeaponIsNotSelected(void)
+{
+    s32 right;
+    s32 left;
+
+    /* Arrange */
+    reset_fixture();
+    player_fixture.equipallguns = TRUE;
+    player_count = 2;
+    dual_wield_weapon = ITEM_WPPK;
+    bondinvAddInvItem(ITEM_AK47);
+    right = ITEM_WPPK;
+    left = ITEM_UNARMED;
+
+    /* Act */
+    bondinvCycleForward(&right, &left, FALSE);
+
+    /* Assert */
+    expect_true(right != ITEM_WPPK || left != ITEM_WPPK,
+                "multiplayer all-guns cycling does not select a dual weapon pair");
+    expect_int(left, ITEM_UNARMED,
+               "multiplayer all-guns cycling keeps the off-hand unarmed");
+}
+
+static void GivenAllGunsWithoutAmmo_WhenCyclingForwardWithAmmoRequired_ThenCurrentWeaponRemainsSelected(void)
+{
+    s32 right;
+    s32 left;
+
+    /* Arrange */
+    reset_fixture();
+    player_fixture.equipallguns = TRUE;
+    ammo_available = FALSE;
+    right = ITEM_WPPK;
+    left = ITEM_UNARMED;
+
+    /* Act */
+    bondinvCycleForward(&right, &left, TRUE);
+
+    /* Assert */
+    expect_true(right == ITEM_WPPK && left == ITEM_UNARMED,
+                "forward cycling keeps the current pair when no weapon has ammo");
+}
+
+static void GivenAllGunsWithoutAmmo_WhenCyclingBackwardWithAmmoRequired_ThenCurrentWeaponRemainsSelected(void)
+{
+    s32 right;
+    s32 left;
+
+    /* Arrange */
+    reset_fixture();
+    player_fixture.equipallguns = TRUE;
+    ammo_available = FALSE;
+    right = ITEM_WPPK;
+    left = ITEM_UNARMED;
+
+    /* Act */
+    bondinvCycleBackward(&right, &left, TRUE);
+
+    /* Assert */
+    expect_true(right == ITEM_WPPK && left == ITEM_UNARMED,
+                "backward cycling keeps the current pair when no weapon has ammo");
+}
+
+static void GivenStoredWeaponWithoutAmmo_WhenCyclingForwardWithAmmoRequired_ThenCurrentPairIsPreserved(void)
+{
+    s32 right;
+    s32 left;
+
+    /* Arrange */
+    reset_fixture();
+    bondinvAddInvItem(ITEM_WPPK);
+    ammo_available = FALSE;
+    right = ITEM_UNARMED;
+    left = ITEM_UNARMED;
+
+    /* Act */
+    bondinvCycleForward(&right, &left, TRUE);
+
+    /* Assert */
+    expect_true(right == ITEM_UNARMED && left == ITEM_UNARMED,
+                "forward cycling does not select a stored weapon without ammo");
+}
+
+static void GivenStoredWeaponWithoutAmmo_WhenCyclingBackwardWithAmmoRequired_ThenCurrentPairIsPreserved(void)
+{
+    s32 right;
+    s32 left;
+
+    /* Arrange */
+    reset_fixture();
+    bondinvAddInvItem(ITEM_WPPK);
+    ammo_available = FALSE;
+    right = ITEM_BOMBCASE;
+    left = ITEM_UNARMED;
+
+    /* Act */
+    bondinvCycleBackward(&right, &left, TRUE);
+
+    /* Assert */
+    expect_true(right == ITEM_BOMBCASE && left == ITEM_UNARMED,
+                "backward cycling does not select a stored weapon without ammo");
+}
+
+static void GivenUnknownInventoryIndex_WhenLookingUpWatchText_ThenUnarmedTextIsReturned(void)
+{
+    /* Arrange */
+    reset_fixture();
+
+    /* Act */
+    bondinvGetNameByIndex(ITEM_BOMBCASE);
+
+    /* Assert */
+    expect_int(bondinvGetTextbyInvIndex(ITEM_BOMBCASE), ITEM_UNARMED,
+               "an unknown inventory index resolves to the unarmed item");
+    expect_true(bondinvGetNameByIndex(ITEM_BOMBCASE) == (u16 *)langGet(ITEM_UNARMED) &&
+                    bondinvGetLongNameByIndex(ITEM_BOMBCASE) ==
+                        (u16 *)langGet(ITEM_UNARMED + 1) &&
+                    bondinvGetFirstTitlebyIndex(ITEM_BOMBCASE) ==
+                        (u16 *)langGet(ITEM_UNARMED + 2) &&
+                    bondinvGetSecondTitlebyIndex(ITEM_BOMBCASE) ==
+                        (u16 *)langGet(ITEM_UNARMED + 3),
+                "unknown watch labels use the unarmed text fallback");
+}
+
+static void GivenCollectableWeaponProperty_WhenIndexed_ThenItIsReturnedAsInventoryContent(void)
+{
+    PropRecord prop;
+    WeaponObjRecord weapon;
+
+    /* Arrange */
+    reset_fixture();
+    memset(&prop, 0, sizeof(prop));
+    memset(&weapon, 0, sizeof(weapon));
+    weapon.type = PROPDEF_COLLECTABLE;
+    weapon.weaponnum = ITEM_AK47;
+    weapon.runtime_bitflags = 0x400;
+    prop.type = PROP_TYPE_WEAPON;
+    prop.obj = (ObjectRecord *)&weapon;
+    bondinvAddPropToInv(&prop);
+
+    /* Act */
+    bondinvGetItemByIndex(0);
+
+    /* Assert */
+    expect_true(bondinvGetItemByIndex(0) != NULL,
+                "a visible collectable weapon property is returned by inventory index");
+    expect_true(bondinvGetItemByIndex(1) == NULL,
+                "the collectable weapon property contributes exactly one inventory entry");
+}
+
 static void test_inventory_counting_and_flags(void)
 {
     PropRecord prop;
@@ -752,6 +924,14 @@ int main(void)
     test_inventory_property_paths_and_all_guns_indices();
     test_inventory_capacity_and_linked_weapon_edges();
     test_inventory_cycle_and_weapon_history();
+    GivenAllGunsAndSinglePlayer_WhenCyclingForward_ThenAvailableDualWeaponIsSelected();
+    GivenAllGunsAndMultiplayer_WhenCyclingForward_ThenDualWeaponIsNotSelected();
+    GivenAllGunsWithoutAmmo_WhenCyclingForwardWithAmmoRequired_ThenCurrentWeaponRemainsSelected();
+    GivenAllGunsWithoutAmmo_WhenCyclingBackwardWithAmmoRequired_ThenCurrentWeaponRemainsSelected();
+    GivenStoredWeaponWithoutAmmo_WhenCyclingForwardWithAmmoRequired_ThenCurrentPairIsPreserved();
+    GivenStoredWeaponWithoutAmmo_WhenCyclingBackwardWithAmmoRequired_ThenCurrentPairIsPreserved();
+    GivenUnknownInventoryIndex_WhenLookingUpWatchText_ThenUnarmedTextIsReturned();
+    GivenCollectableWeaponProperty_WhenIndexed_ThenItIsReturnedAsInventoryContent();
     test_inventory_counting_and_flags();
 
     if (failures != 0)

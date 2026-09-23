@@ -23,6 +23,7 @@ extern s32 dword_CODE_bss_8007A0D0;
 extern s32 dword_CODE_bss_8007A0D4;
 extern s32 dword_CODE_bss_8007A0D8;
 extern s32 dword_CODE_bss_8007A0DC;
+extern s16 word_CODE_bss_8007A0F0;
 extern s16 word_CODE_bss_8007A0F2;
 
 static int failures;
@@ -207,6 +208,53 @@ static void test_allocate_rejects_bad_requests_and_reuses_merged_space(void)
                 "freeing adjacent allocations merges them back into the original block");
 }
 
+static void test_allocate_exact_fit_consumes_and_restores_the_whole_block(void)
+{
+    uintptr_t exact;
+    uintptr_t reused;
+
+    fake_player_count = 1;
+    fake_stage = 10;
+    reset_fake_pool();
+    sub_GAME_7F09B820();
+
+    exact = vtxstore_allocate(500, 0xCCCC, 0, 0);
+    expect_true(exact == (uintptr_t)dword_CODE_bss_8007A0E0 &&
+                    word_CODE_bss_8007A0F0 == 0,
+                "an exact-fit primary allocation consumes the complete free block");
+    expect_true(vtxstore_allocate(1, 0xCCCC, 0, 0) == 0,
+                "the primary pool rejects an allocation while its exact-fit block is live");
+
+    sub_GAME_7F09C044((Vertex *)exact);
+    expect_true(word_CODE_bss_8007A0F0 == 500,
+                "freeing an exact-fit allocation restores the complete primary block");
+    reused = vtxstore_allocate(500, 0xCCCC, 0, 0);
+    expect_true(reused == exact,
+                "the restored exact-fit primary block is reusable at its original address");
+}
+
+static void test_free_ignores_null_and_interior_addresses(void)
+{
+    uintptr_t allocation;
+    s16 free_before;
+
+    fake_player_count = 1;
+    fake_stage = 10;
+    reset_fake_pool();
+    sub_GAME_7F09B820();
+
+    allocation = vtxstore_allocate(4, 0xCCCC, 0, 0);
+    free_before = word_CODE_bss_8007A0F0;
+    sub_GAME_7F09C044(NULL);
+    sub_GAME_7F09C044((Vertex *)allocation + 1);
+    expect_true(word_CODE_bss_8007A0F0 == free_before,
+                "free ignores null and interior addresses instead of corrupting the free list");
+
+    sub_GAME_7F09C044((Vertex *)allocation);
+    expect_true(word_CODE_bss_8007A0F0 == 500,
+                "the owning block remains freeable after rejected addresses");
+}
+
 static void test_free_releases_secondary_pool_space(void)
 {
     uintptr_t secondary;
@@ -274,6 +322,7 @@ static void test_fix_refs_walks_object_models_without_pointer_narrowing(void)
     ModelFileHeader header;
     ModelNode root;
     ModelNode child;
+    ModelNode ancestor;
     ModelNode sibling;
 
     memset(&prop, 0, sizeof(prop));
@@ -282,6 +331,7 @@ static void test_fix_refs_walks_object_models_without_pointer_narrowing(void)
     memset(&header, 0, sizeof(header));
     memset(&root, 0, sizeof(root));
     memset(&child, 0, sizeof(child));
+    memset(&ancestor, 0, sizeof(ancestor));
     memset(&sibling, 0, sizeof(sibling));
     prop.type = 1;
     prop.obj = &object;
@@ -320,6 +370,19 @@ static void test_fix_refs_walks_object_models_without_pointer_narrowing(void)
     sub_GAME_7F09BAC4(0x33445566, 0x778899AA);
     expect_true(fake_node_rwdata == 0x778899AA,
                 "vtxstore reference repair follows a sibling through its parent walk");
+
+    root.Child = &child;
+    child.Parent = &ancestor;
+    child.Next = NULL;
+    child.Opcode = 0x02;
+    ancestor.Child = NULL;
+    ancestor.Next = &sibling;
+    sibling.Parent = &ancestor;
+    sibling.Opcode = 0x18;
+    fake_node_rwdata = 0x44556677;
+    sub_GAME_7F09BAC4(0x44556677, 0x8899AABB);
+    expect_true(fake_node_rwdata == 0x8899AABB,
+                "vtxstore reference repair climbs a parent link before taking its sibling");
 
     prop.type = 3;
     fake_node_rwdata = 0x11223344;
@@ -360,15 +423,50 @@ static void test_tick_merges_duplicate_secondary_batches(void)
                 "the merged free block is reusable at the end of the surviving batch");
 }
 
+static void test_tick_repairs_the_back_link_after_merging_adjacent_free_batches(void)
+{
+    uintptr_t first;
+    uintptr_t duplicate;
+    uintptr_t released;
+    uintptr_t live_successor;
+    uintptr_t merged;
+
+    fake_player_count = 1;
+    fake_stage = 10;
+    reset_fake_pool();
+    sub_GAME_7F09B820();
+    fake_active_tail = NULL;
+    fake_compact_callback_count = 0;
+
+    first = vtxstore_allocate(1200, 0xB0B, 77, 88);
+    duplicate = vtxstore_allocate(100, 0xB0B, 77, 88);
+    released = vtxstore_allocate(100, 0xB0B, 11, 22);
+    live_successor = vtxstore_allocate(50, 0xB0B, 33, 44);
+    expect_true(first != 0 && duplicate != 0 && released != 0 && live_successor != 0,
+                "the compaction fixture allocates duplicate, free, and live successor batches");
+
+    sub_GAME_7F09C044((Vertex *)released);
+    sub_GAME_7F09BBBC();
+    expect_true(fake_compact_callback_count == 1,
+                "low secondary-pool space invokes compaction after duplicate merging");
+
+    merged = vtxstore_allocate(200, 0xB0B, 0, 0);
+    expect_true(merged == duplicate,
+                "compaction merges adjacent free batches while retaining the live successor link");
+}
+
 int main(void)
 {
     test_reset_selects_expected_pool_sizes();
     test_allocate_preserves_pointer_width_and_splits_free_blocks();
     test_allocate_rejects_bad_requests_and_reuses_merged_space();
+    test_allocate_exact_fit_consumes_and_restores_the_whole_block();
+    test_free_ignores_null_and_interior_addresses();
     test_free_releases_secondary_pool_space();
     test_free_preserves_internal_free_list_links();
     test_fix_refs_walks_object_models_without_pointer_narrowing();
     test_tick_merges_duplicate_secondary_batches();
+    test_tick_repairs_the_back_link_after_merging_adjacent_free_batches();
 
     if (failures != 0)
     {

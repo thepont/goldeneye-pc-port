@@ -159,6 +159,14 @@ struct GfxRenderingAPI {
                                      uint32_t *width,
                                      uint32_t *height);
     void (*destroy)(void);
+    /* Shadow capture replays the display list on the frontend. The backend
+     * brackets that CPU traversal to restore GL state, then renders the
+     * captured view-space caster triangles into a depth-only light target. */
+    bool (*begin_shadow_scene_capture)(void);
+    void (*end_shadow_scene_capture)(void);
+    bool (*render_shadow_map)(const float *view_space_vertices,
+                              size_t vertex_count,
+                              const float direction_to_light[3]);
 };
 
 #endif

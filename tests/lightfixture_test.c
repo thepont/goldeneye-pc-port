@@ -130,6 +130,25 @@ static void test_fixture_table_lifecycle_and_capacity(void)
                 "a full fixture table reports its bounded capacity");
 }
 
+static void test_fixture_entry_registration_is_safe_when_full(void)
+{
+    Gfx command;
+
+    memset(&command, 0, sizeof(command));
+    lightFixtureInitTables();
+    for (s32 i = 0; i < 100; ++i)
+    {
+        light_fixture_table[i].room_index = (s16)(i + 1);
+    }
+
+    current_light_fixture_room = 9;
+    lightFixtureEntryBegin(&command);
+    lightFixtureEntryEnd(&command);
+    expect_true(current_light_fixture_slot == 100 &&
+                    lightFixtureFindFreeSlot() == 100,
+                "fixture registration drops safely when the table is full");
+}
+
 static void test_segmented_vertex_resolution_keeps_host_pointer_width(void)
 {
     Gfx commands[2];
@@ -347,6 +366,74 @@ static void test_break_path_darkens_once_and_spawns_deterministic_shards(void)
     }
 }
 
+static void test_break_rejects_out_of_range_hits_and_walks_packed_triangles(void)
+{
+    Gfx commands[5];
+    Vtx vertices[9];
+    int i;
+
+    memset(commands, 0, sizeof(commands));
+    memset(vertices, 0, sizeof(vertices));
+    g_BgRoomInfo[2].vertices = vertices;
+
+    vertices[0].v.ob[0] = 0;
+    vertices[0].v.ob[1] = 0;
+    vertices[0].v.ob[2] = 0;
+    vertices[1].v.ob[0] = 20;
+    vertices[1].v.ob[1] = 0;
+    vertices[1].v.ob[2] = 0;
+    vertices[2].v.ob[0] = 0;
+    vertices[2].v.ob[1] = 20;
+    vertices[2].v.ob[2] = 0;
+    for (i = 3; i < 9; ++i)
+    {
+        vertices[i].v.ob[0] = (s16)(1000 + i * 10);
+        vertices[i].v.ob[1] = (s16)(1000 + i * 10);
+        vertices[i].v.ob[2] = (s16)(1000 + i * 10);
+    }
+    for (i = 0; i < 9; ++i)
+    {
+        vertices[i].v.cn[0] = vertices[i].v.cn[1] = 100;
+        vertices[i].v.cn[2] = vertices[i].v.cn[3] = 100;
+    }
+
+    gSPVertex(&commands[0], vertices, 9, 0);
+    gSP1Triangle(&commands[1], 0, 1, 2, 0);
+    gSP1Triangle(&commands[2], 3, 0, 4, 0);
+    gSP1Triangle(&commands[3], 5, 6, 0, 0);
+    gSP4Triangles(&commands[4],
+                  7, 8, 3,
+                  7, 0, 8,
+                  7, 8, 0,
+                  0, 7, 8);
+
+    lightFixtureInitTables();
+    light_fixture_table[0].room_index = 2;
+    light_fixture_table[0].ptr_start_pertinent_DL = &commands[1];
+    light_fixture_table[0].ptr_end_pertinent_DL = &commands[5];
+    test_room_data_float1 = 1.0f;
+    test_room_data_float2 = 1.0f;
+    test_shard_count = 0;
+
+    lightFixtureBreak(&commands[0], 0, 2);
+    expect_true(cur_entry_darkened_light_table == 0 && test_shard_count == 0 &&
+                    vertices[0].v.cn[0] == 100,
+                "a hit before a fixture display-list range is ignored");
+
+    lightFixtureBreak(&commands[5], 0, 2);
+    expect_true(cur_entry_darkened_light_table == 0 && test_shard_count == 0 &&
+                    vertices[0].v.cn[0] == 100,
+                "a hit at the fixture display-list end is ignored");
+
+    lightFixtureBreak(&commands[1], 0, 2);
+    expect_true(vertices[0].v.cn[0] == 25 && vertices[1].v.cn[0] == 25 &&
+                    vertices[2].v.cn[0] == 25 && vertices[3].v.cn[0] == 25 &&
+                    vertices[4].v.cn[0] == 25 && vertices[5].v.cn[0] == 25 &&
+                    vertices[6].v.cn[0] == 25 && vertices[7].v.cn[0] == 25 &&
+                    vertices[8].v.cn[0] == 25 && test_shard_count > 0,
+                "fixture break walks TRI1 and packed TRI4 neighbors by proximity");
+}
+
 static void test_darkened_vertices_are_idempotent_and_restored(void)
 {
     Vtx vertices[3];
@@ -380,17 +467,42 @@ static void test_darkened_vertices_are_idempotent_and_restored(void)
                 "reloading a room reapplies its persistent darkened-light record");
 }
 
+static void test_darkened_light_table_wraps_as_a_bounded_ring(void)
+{
+    Vtx vertices[513];
+    int i;
+
+    memset(vertices, 0, sizeof(vertices));
+    g_BgRoomInfo[1].vertices = vertices;
+    lightFixtureInitTables();
+
+    for (i = 0; i < 513; ++i)
+    {
+        vertices[i].v.cn[0] = vertices[i].v.cn[1] = 64;
+        vertices[i].v.cn[2] = vertices[i].v.cn[3] = 64;
+        darken_vertex_in_room(&vertices[i], 1);
+    }
+
+    expect_true(cur_entry_darkened_light_table == 1 &&
+                    !darkened_light_table_contains_vertex(&vertices[0], 1) &&
+                    darkened_light_table_contains_vertex(&vertices[512], 1),
+                "darkened-light history wraps after its fixed capacity");
+}
+
 int main(void)
 {
     test_light_image_classification();
     test_fixture_table_lifecycle_and_capacity();
+    test_fixture_entry_registration_is_safe_when_full();
     test_segmented_vertex_resolution_keeps_host_pointer_width();
     test_triangle_index_decoding_is_portable_and_bounded();
     test_tri4_index_decoding_uses_all_four_packed_triangles();
     test_triangle_coordinates_and_darkening_share_decoded_indices();
     test_room_clear_only_releases_matching_fixture_entries();
     test_break_path_darkens_once_and_spawns_deterministic_shards();
+    test_break_rejects_out_of_range_hits_and_walks_packed_triangles();
     test_darkened_vertices_are_idempotent_and_restored();
+    test_darkened_light_table_wraps_as_a_bounded_ring();
 
     if (failures != 0)
     {

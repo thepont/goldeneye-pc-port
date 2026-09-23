@@ -146,6 +146,19 @@ static inline int geWaterFeatureEnabled(unsigned int feature_mask,
     return (feature_mask & feature) != 0U;
 }
 
+/* GL_FRAMEBUFFER_SRGB is not a universally valid GLES capability. Callers
+ * must gate both state queries and state changes on the version/extension
+ * exposed by the active context. */
+static inline int geWaterFramebufferSrgbControlAvailable(
+    int is_gles, int desktop_core, int desktop_extension,
+    int gles_write_control_extension)
+{
+    if (is_gles != 0) {
+        return gles_write_control_extension != 0;
+    }
+    return desktop_core != 0 || desktop_extension != 0;
+}
+
 typedef struct GeWaterReflectionAtlasRegion {
     float scale_x;
     float scale_y;

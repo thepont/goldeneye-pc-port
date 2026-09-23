@@ -18,6 +18,7 @@ ALBank *g_musicSfxBufferPtr;
 static struct player current_player;
 static s32 fake_controller_count;
 static s8 fake_stick_x;
+static s8 fake_stick_y;
 static u16 fake_pressed_buttons;
 static u16 last_sound_index;
 static u16 applied_music_volume;
@@ -27,10 +28,13 @@ static int failures;
 
 extern u32 controller_options_index;
 extern u32 controlstick_lr_enabled;
+extern u32 watch_stick_y_nav_ready;
 extern s32 watch_item_is_actively_selected;
 extern void game_option_select_value(u32 *value, u32 selected_value);
 extern void game_option_toggle_input(s32 option_index);
 extern u32 controllerCheckDualControllerTypesAllowed(void);
+extern void controller_options_controlstyle_navigation(void);
+extern void controller_options_inputs_navigation(void);
 
 static void expect(int condition, const char *message)
 {
@@ -74,6 +78,7 @@ static void reset_fixture(void)
     j_text_trigger = FALSE;
     fake_controller_count = 1;
     fake_stick_x = 0;
+    fake_stick_y = 0;
     fake_pressed_buttons = 0;
     last_sound_index = 0;
     applied_music_volume = 0;
@@ -81,6 +86,8 @@ static void reset_fixture(void)
     music_volume_calls = 0;
     controller_options_index = CONTROLLER_OPTIONS_INDEX_STYLE;
     controlstick_lr_enabled = 1;
+    watch_stick_y_nav_ready = 0;
+    watch_item_is_actively_selected = 0;
 }
 
 s8 joyGetControllerCount(void)
@@ -92,6 +99,12 @@ s8 joyGetStickX(s8 player)
 {
     (void)player;
     return fake_stick_x;
+}
+
+s8 joyGetStickY(s8 player)
+{
+    (void)player;
+    return fake_stick_y;
 }
 
 u16 joyGetButtonsPressedThisFrame(s8 player, u16 mask)
@@ -263,6 +276,91 @@ static void test_toggle_input_obeys_selection_edges_and_option_boundaries(void)
                "left direction retreats a three-state option");
 }
 
+static void GivenControllerStylePage_WhenDownIsPressed_ThenInputBindingsPageIsSelected(void)
+{
+    /* Arrange */
+    reset_fixture();
+    watch_stick_y_nav_ready = 1;
+    fake_pressed_buttons = D_JPAD;
+
+    /* Act */
+    controller_options_controlstyle_navigation();
+
+    /* Assert */
+    expect_u32(controller_options_index, CONTROLLER_OPTIONS_INDEX_INPUTS,
+               "down selects the controller input-bindings page");
+    expect_u32(watch_stick_y_nav_ready, 0,
+               "controller page navigation consumes the stick navigation latch");
+}
+
+static void GivenControllerInputsPage_WhenUpIsPressed_ThenControlStylePageIsSelected(void)
+{
+    /* Arrange */
+    reset_fixture();
+    controller_options_index = CONTROLLER_OPTIONS_INDEX_INPUTS;
+    watch_stick_y_nav_ready = 1;
+    fake_pressed_buttons = U_JPAD;
+
+    /* Act */
+    controller_options_inputs_navigation();
+
+    /* Assert */
+    expect_u32(controller_options_index, CONTROLLER_OPTIONS_INDEX_STYLE,
+               "up returns from controller input bindings to control style");
+    expect_u32(watch_stick_y_nav_ready, 0,
+               "returning from controller input bindings consumes the stick latch");
+}
+
+static void GivenControllerStyleIsSelected_WhenDownIsPressed_ThenPageSelectionIsUnchanged(void)
+{
+    /* Arrange */
+    reset_fixture();
+    watch_stick_y_nav_ready = 1;
+    watch_item_is_actively_selected = 1;
+    fake_pressed_buttons = D_JPAD;
+
+    /* Act */
+    controller_options_controlstyle_navigation();
+
+    /* Assert */
+    expect_u32(controller_options_index, CONTROLLER_OPTIONS_INDEX_STYLE,
+               "editing a control style prevents page navigation");
+    expect_u32(watch_stick_y_nav_ready, 1,
+               "blocked controller page navigation preserves the stick latch");
+}
+
+static void GivenVerticalLookIsUninverted_WhenRightPadEdgeIsPressed_ThenLookIsInverted(void)
+{
+    /* Arrange */
+    reset_fixture();
+    watch_item_is_actively_selected = 1;
+    game_options_entries[PLAYER_OPTION_LOOK].current_value = 0;
+    fake_pressed_buttons = R_JPAD;
+
+    /* Act */
+    game_option_toggle_input(PLAYER_OPTION_LOOK);
+
+    /* Assert */
+    expect_u32(get_cur_player_look_vertical_inverted(), 1,
+               "the controller look option enables vertical inversion");
+}
+
+static void GivenVerticalLookIsInverted_WhenLeftPadEdgeIsPressed_ThenLookIsUninverted(void)
+{
+    /* Arrange */
+    reset_fixture();
+    watch_item_is_actively_selected = 1;
+    game_options_entries[PLAYER_OPTION_LOOK].current_value = 1;
+    fake_pressed_buttons = L_JPAD;
+
+    /* Act */
+    game_option_toggle_input(PLAYER_OPTION_LOOK);
+
+    /* Assert */
+    expect_u32(get_cur_player_look_vertical_inverted(), 0,
+               "the controller look option disables vertical inversion");
+}
+
 static void test_volume_and_numeric_helpers_preserve_boundary_contracts(void)
 {
     reset_fixture();
@@ -299,6 +397,11 @@ int main(void)
     test_dual_controller_gate_requires_two_pads_and_a_two_handed_style();
     test_option_selection_disables_horizontal_navigation_and_beeps();
     test_toggle_input_obeys_selection_edges_and_option_boundaries();
+    GivenControllerStylePage_WhenDownIsPressed_ThenInputBindingsPageIsSelected();
+    GivenControllerInputsPage_WhenUpIsPressed_ThenControlStylePageIsSelected();
+    GivenControllerStyleIsSelected_WhenDownIsPressed_ThenPageSelectionIsUnchanged();
+    GivenVerticalLookIsUninverted_WhenRightPadEdgeIsPressed_ThenLookIsInverted();
+    GivenVerticalLookIsInverted_WhenLeftPadEdgeIsPressed_ThenLookIsUninverted();
     test_volume_and_numeric_helpers_preserve_boundary_contracts();
 
     if (failures != 0)

@@ -1,12 +1,20 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <music.h>
+#include <snd.h>
 #include <ultra64.h>
 
+#include "boss.h"
 #include "bondconstants.h"
 #include "bondview.h"
+#include "bondinv.h"
+#include "file.h"
+#include "front.h"
+#include "gun.h"
 #include "language.h"
 #include "mpmenu.h"
+#include "mp_music.h"
 #include "player.h"
 #include "assets/obseg/text/LmpmenuE.h"
 
@@ -16,6 +24,7 @@ struct player_data g_playerPlayerData[MAX_MULTIPLAYER];
 struct player_data *g_playerPerm;
 
 static struct player current_player;
+static struct player second_player;
 static u32 random_values[32];
 static int random_index;
 static s32 fake_player_count;
@@ -23,9 +32,15 @@ static MPSCENARIOS fake_scenario;
 static s32 fake_stick_x;
 static u16 fake_buttons;
 static s32 fake_controls_locked;
+static s32 current_player_index;
+static s32 fake_mission_timer;
+static LEVELID fake_loaded_stage;
 static int failures;
 
 extern s32 g_pausedFlag;
+
+s32 speedgraphframes;
+s32 g_musicXTrack1Fade;
 
 extern s32 mpwatchIsPlayerPressingRight(s32 player);
 extern s32 mpwatchIsPlayerPressingLeft(s32 player);
@@ -56,7 +71,19 @@ static void expect_true(int condition, const char *message)
 
 u32 randomGetNext(void)
 {
-    u32 value = random_values[random_index < 32 ? random_index : 31];
+    u32 value;
+
+    if (random_index < 32)
+    {
+        value = random_values[random_index];
+    }
+    else
+    {
+        /* Award selection retries until it finds a remaining slot. Keep the
+         * deterministic fake bounded without forcing production code to know
+         * anything about this test fixture. */
+        value = (u32)((random_index - 32) % 17);
+    }
     random_index++;
     return value;
 }
@@ -64,6 +91,7 @@ u32 randomGetNext(void)
 static void reset_fixture(void)
 {
     memset(&current_player, 0, sizeof(current_player));
+    memset(&second_player, 0, sizeof(second_player));
     memset(g_playerPointers, 0, sizeof(g_playerPointers));
     memset(g_playerPlayerData, 0, sizeof(g_playerPlayerData));
     memset(random_values, 0, sizeof(random_values));
@@ -73,11 +101,110 @@ static void reset_fixture(void)
     fake_stick_x = 0;
     fake_buttons = 0;
     fake_controls_locked = 0;
+    current_player_index = 0;
+    fake_mission_timer = 0;
+    fake_loaded_stage = (LEVELID)-1;
     g_CurrentPlayer = &current_player;
+    g_playerPointers[0] = &current_player;
+    g_playerPointers[1] = &second_player;
     g_playerPerm = &g_playerPlayerData[0];
     g_stopPlayFlag = 0;
     g_gameOverFlag = 0;
     g_pausedFlag = 0;
+    speedgraphframes = 1;
+}
+
+s32 get_cur_playernum(void)
+{
+    return current_player_index;
+}
+
+s32 get_player_position_in_shuffled(s32 current_player_num)
+{
+    return current_player_num;
+}
+
+s32 getMissiontimer(void)
+{
+    return fake_mission_timer;
+}
+
+ALBank *g_musicSfxBufferPtr;
+
+ALSoundState *sndPlaySfx(struct ALBankAlt_s *sound_bank,
+                         s16 sound_index,
+                         ALSoundState *pending_state)
+{
+    (void)sound_bank;
+    (void)sound_index;
+    (void)pending_state;
+    return NULL;
+}
+
+void bossSetLoadedStage(LEVELID stage)
+{
+    fake_loaded_stage = stage;
+}
+
+void sndDeactivateAllSfxByFlag_1(void)
+{
+}
+
+void set_missionstate(MISSION_STATE_ID state)
+{
+    (void)state;
+}
+
+u16 sub_GAME_7F0C0BF0(void)
+{
+    return 0;
+}
+
+void musicTrack1ApplySeqpVol(u16 volume)
+{
+    (void)volume;
+}
+
+void musicTrack1Play(s32 track)
+{
+    (void)track;
+}
+
+void set_cur_player(s32 playernum)
+{
+    current_player_index = playernum;
+    g_CurrentPlayer = g_playerPointers[playernum];
+    g_playerPerm = &g_playerPlayerData[playernum];
+}
+
+s32 bondinvGetWeaponOfChoice(s32 *weapon1, s32 *weapon2)
+{
+    if (weapon1 != NULL)
+    {
+        *weapon1 = 0;
+    }
+    if (weapon2 != NULL)
+    {
+        *weapon2 = 0;
+    }
+    return 0;
+}
+
+void store_favorite_weapon_current_player(u32 right, u32 left)
+{
+    (void)right;
+    (void)left;
+}
+
+s32 get_curplayer_shot_register(SHOT_REGISTER shot_register)
+{
+    (void)shot_register;
+    return 0;
+}
+
+s32 get_selected_num_players(void)
+{
+    return fake_player_count;
 }
 
 s32 getPlayerCount(void)
@@ -489,6 +616,256 @@ static void test_rank_buffer_uses_score_order_and_team_rank_rules(void)
                 "team scenario maps the third displayed row to second rank");
 }
 
+static void select_fixture_player(s32 playernum)
+{
+    current_player_index = playernum;
+    g_CurrentPlayer = g_playerPointers[playernum];
+    g_playerPerm = &g_playerPlayerData[playernum];
+}
+
+static void GivenMultiplayerPauseMenu_WhenOwnerPressesA_ThenGamePausesAndControlsLock(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    current_player.mpmenuon = 1;
+    current_player.mpmenumode = MENU_PAUSE;
+    fake_buttons = A_BUTTON;
+
+    /* Act */
+    mpwatchMenuTick();
+
+    /* Assert */
+    expect_s32(checkGamePaused(), 1,
+                "pause menu marks the multiplayer game as paused");
+    expect_s32(fake_controls_locked, 1,
+                "pause menu locks gameplay controls for the pause");
+}
+
+static void GivenPausedMenu_WhenNonOwnerPressesA_ThenPauseRemainsOwned(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    current_player.mpmenuon = 1;
+    current_player.mpmenumode = MENU_PAUSE;
+    fake_buttons = A_BUTTON;
+    mpwatchMenuTick();
+    select_fixture_player(1);
+    second_player.mpmenuon = 1;
+    second_player.mpmenumode = MENU_PAUSE;
+
+    /* Act */
+    mpwatchMenuTick();
+
+    /* Assert */
+    expect_s32(checkGamePaused(), 1,
+               "a non-owner cannot resume the shared multiplayer pause");
+    expect_s32(fake_controls_locked, 1,
+               "a non-owner cannot unlock shared multiplayer controls");
+}
+
+static void GivenPausedMenu_WhenOwnerPressesA_ThenGameResumes(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    current_player.mpmenuon = 1;
+    current_player.mpmenumode = MENU_PAUSE;
+    fake_buttons = A_BUTTON;
+    mpwatchMenuTick();
+
+    /* Act */
+    mpwatchMenuTick();
+
+    /* Assert */
+    expect_s32(checkGamePaused(), 0,
+               "the pause owner can resume the multiplayer game");
+    expect_s32(fake_controls_locked, 0,
+               "resuming unlocks multiplayer gameplay controls");
+}
+
+static void GivenClosedMultiplayerMenu_WhenStartIsPressed_ThenScoresMenuOpens(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    current_player.bondhealth = 73.0f;
+    current_player.bondarmour = 42.0f;
+    fake_buttons = START_BUTTON;
+
+    /* Act */
+    mpwatchMenuTick();
+
+    /* Assert */
+    expect_s32(current_player.mpmenuon, 1,
+               "start opens the multiplayer watch menu");
+    expect_s32(current_player.mpmenumode, MENU_SCORES,
+               "start opens the multiplayer scores page");
+    expect_s32(current_player.mpjoywascentre, 1,
+               "opening the menu arms the controller edge latch");
+    expect_true(current_player.apparenthealth == current_player.bondhealth,
+                "opening the menu snapshots the current health");
+    expect_true(current_player.apparentarmour == current_player.bondarmour,
+                "opening the menu snapshots the current armour");
+}
+
+static void GivenDeadMultiplayerPlayer_WhenMenuTicks_ThenPauseMenuCloses(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    current_player.bonddead = 1;
+    current_player.mpmenuon = 1;
+    current_player.healthdisplaytime = 60;
+
+    /* Act */
+    mpwatchMenuTick();
+
+    /* Assert */
+    expect_s32(current_player.mpmenuon, 0,
+               "a dead multiplayer player leaves the pause menu");
+    expect_s32(current_player.healthdisplaytime, 0,
+               "death clears the multiplayer health display timer");
+}
+
+static void GivenExitMenu_WhenAIsPressed_ThenExitConfirmationOpens(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    current_player.mpmenuon = 1;
+    current_player.mpmenumode = MENU_EXIT;
+    fake_buttons = A_BUTTON;
+
+    /* Act */
+    mpwatchMenuTick();
+
+    /* Assert */
+    expect_s32(current_player.mpmenumode, MENU_EXIT_CONFIRM,
+               "the exit page opens its confirmation page");
+    expect_s32(current_player.mpquitconfirm, 0,
+               "exit confirmation starts with quitting disabled");
+}
+
+static void GivenExitConfirmation_WhenRightIsPressed_ThenQuitChoiceIsEnabled(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    current_player.mpmenuon = 1;
+    current_player.mpmenumode = MENU_EXIT_CONFIRM;
+    current_player.mpquitconfirm = 0;
+    fake_buttons = R_JPAD;
+
+    /* Act */
+    mpwatchMenuTick();
+
+    /* Assert */
+    expect_s32(current_player.mpquitconfirm, 1,
+               "right on exit confirmation selects quitting");
+}
+
+static void GivenFinishedMenu_WhenBIsPressed_ThenScoresMenuReopens(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    current_player.mpmenuon = 1;
+    current_player.mpmenumode = MENU_FINISHED;
+    fake_buttons = B_BUTTON;
+
+    /* Act */
+    mpwatchMenuTick();
+
+    /* Assert */
+    expect_s32(current_player.mpmenuon, 1,
+               "the finished page remains visible when returning to scores");
+    expect_s32(current_player.mpmenumode, MENU_SCORES,
+               "back from finished returns to the scores page");
+}
+
+static void GivenGameOverScoresMenu_WhenAIsPressed_ThenPlayerMovesToFinished(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    current_player.mpmenuon = 1;
+    current_player.mpmenumode = MENU_SCORES;
+    second_player.mpmenumode = MENU_FINISHED;
+    g_gameOverFlag = 1;
+    fake_buttons = A_BUTTON;
+
+    /* Act */
+    mpwatchMenuTick();
+
+    /* Assert */
+    expect_s32(current_player.mpmenumode, MENU_FINISHED,
+               "game-over confirmation moves the current player to finished");
+    expect_s32((s32)fake_loaded_stage, (s32)LEVELID_TITLE,
+               "all finished players return the game to the title stage");
+}
+
+static void GivenCountdownOwnedByFirstPlayer_WhenFrameAdvances_ThenCountdownReachesGameOverState(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    g_gameOverFlag = 2;
+    speedgraphframes = 3;
+
+    /* Act */
+    mpwatchMenuTick();
+
+    /* Assert */
+    expect_s32(g_gameOverFlag, 1,
+               "the shuffled first player advances the game-over countdown");
+}
+
+static void GivenActiveMultiplayerRound_WhenAwardsAreCalculatedWithoutDelay_ThenResultsMenusArePrepared(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+    g_playerPlayerData[0].kill_counts[1] = 3;
+    g_playerPlayerData[1].kill_counts[0] = 1;
+
+    /* Act */
+    mpCalculateAwards(FALSE);
+
+    /* Assert */
+    expect_s32(current_player.mpmenuon, 1,
+               "immediate award calculation opens player one results");
+    expect_s32(second_player.mpmenuon, 1,
+               "immediate award calculation opens player two results");
+    expect_s32(current_player.mpmenumode, MENU_SCORES,
+               "immediate award calculation selects player one scores");
+    expect_s32(second_player.mpmenumode, MENU_SCORES,
+               "immediate award calculation selects player two scores");
+    expect_s32(g_gameOverFlag, 1,
+               "immediate award calculation enters the game-over state");
+    expect_s32(checkGamePaused(), 1,
+               "award calculation pauses the multiplayer round");
+    expect_s32(fake_controls_locked, 1,
+               "award calculation locks gameplay controls");
+}
+
+static void GivenActiveMultiplayerRound_WhenDelayedAwardsAreCalculated_ThenGameOverCountdownIsStarted(void)
+{
+    /* Arrange */
+    reset_fixture();
+    fake_player_count = 2;
+
+    /* Act */
+    mpCalculateAwards(TRUE);
+
+    /* Assert */
+    expect_true(g_gameOverFlag >= 2,
+                "delayed award calculation starts a visible game-over countdown");
+    expect_s32(checkGamePaused(), 1,
+               "delayed award calculation pauses the multiplayer round");
+}
+
 int main(void)
 {
     test_float_award_ranking_preserves_fractional_values();
@@ -501,6 +878,18 @@ int main(void)
     test_points_follow_each_multiplayer_scenario();
     test_rank_and_score_visibility_matrix();
     test_rank_buffer_uses_score_order_and_team_rank_rules();
+    GivenMultiplayerPauseMenu_WhenOwnerPressesA_ThenGamePausesAndControlsLock();
+    GivenPausedMenu_WhenNonOwnerPressesA_ThenPauseRemainsOwned();
+    GivenPausedMenu_WhenOwnerPressesA_ThenGameResumes();
+    GivenClosedMultiplayerMenu_WhenStartIsPressed_ThenScoresMenuOpens();
+    GivenDeadMultiplayerPlayer_WhenMenuTicks_ThenPauseMenuCloses();
+    GivenExitMenu_WhenAIsPressed_ThenExitConfirmationOpens();
+    GivenExitConfirmation_WhenRightIsPressed_ThenQuitChoiceIsEnabled();
+    GivenFinishedMenu_WhenBIsPressed_ThenScoresMenuReopens();
+    GivenGameOverScoresMenu_WhenAIsPressed_ThenPlayerMovesToFinished();
+    GivenCountdownOwnedByFirstPlayer_WhenFrameAdvances_ThenCountdownReachesGameOverState();
+    GivenActiveMultiplayerRound_WhenAwardsAreCalculatedWithoutDelay_ThenResultsMenusArePrepared();
+    GivenActiveMultiplayerRound_WhenDelayedAwardsAreCalculated_ThenGameOverCountdownIsStarted();
 
     expect_true(failures == 0, "all multiplayer menu policy tests pass");
     return failures == 0 ? 0 : 1;

@@ -364,6 +364,24 @@ static void test_last_single_cache_slot_does_not_read_past_the_cache(void)
                "the final single cache slot is refreshed");
 }
 
+static void GivenJapaneseCacheHasNoFreeSlot_WhenRequestingUncachedSingleGlyph_ThenFallbackPixelsAreReturned(void)
+{
+    struct jpncharpixels *pixels;
+
+    /* Arrange */
+    reset_fixture();
+    reset_japanese_cache(1);
+
+    /* Act */
+    pixels = langGetJpnCharPixels(0x246);
+
+    /* Assert */
+    expect_ptr(pixels, g_JpnCharCachePixels,
+               "a full Japanese cache returns its stable fallback pixel region");
+    expect_s32(rom_copy_calls, 0,
+               "a full Japanese cache does not copy a glyph into a busy slot");
+}
+
 static void test_language_string_bank_guards(void)
 {
     u32 *bank_words;
@@ -415,6 +433,7 @@ int main(void)
     test_language_tick_expires_japanese_cache_entries();
     test_japanese_cache_hit_and_miss_paths();
     test_last_single_cache_slot_does_not_read_past_the_cache();
+    GivenJapaneseCacheHasNoFreeSlot_WhenRequestingUncachedSingleGlyph_ThenFallbackPixelsAreReturned();
     test_language_string_bank_guards();
 
     munmap(fake_bank, 4096);

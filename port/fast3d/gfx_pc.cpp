@@ -44,6 +44,7 @@
 #include "gfx_water_composite_policy.h"
 #include "gfx_water_heightfield_policy.h"
 #include "gfx_water_time_policy.h"
+#include "shadow_mapping_policy.h"
 #include "vector_text.h"
 #include "viewport_policy.h"
 
@@ -127,6 +128,15 @@ static float g_water_reflection_plane_view[4] = {};
 static float g_water_reflection_visible_side = 1.0f;
 static uint32_t g_water_reflection_surface_index = 0;
 static GeDynamicLightRegistry g_world_lights;
+static bool g_shadow_capture_active = false;
+static bool g_shadow_capture_overflow = false;
+static bool g_shadow_map_enabled = false;
+static std::vector<float> g_shadow_capture_vertices;
+static uintptr_t g_shadow_saved_segments[16] = {};
+static constexpr GeAdvancedLightingMaterial kDynamicLightingMaterial = {
+    {1.0f, 1.0f, 1.0f},
+    32.0f,
+};
 static constexpr GeDynamicLight kDynamicLight = {
     {0.0f, 0.0f, 0.0f},
     900.0f,
@@ -154,6 +164,11 @@ struct LoadedVertex {
     float source_view_x, source_view_y, source_view_z;
     float world_x, world_y, world_z;
     float reflection_plane_distance;
+    /* Port world lights are accumulated in linear space and transported as a
+     * separate varying. Keeping this out of RGBA preserves the legacy
+     * display-space shade colour and lets the fragment shader decode/encode
+     * exactly once around the material and light sum. */
+    float linear_dynamic_light[3];
     struct RGBA color;
     uint8_t fog;
     uint8_t clip_rej;
@@ -312,6 +327,11 @@ static struct RenderingState {
     struct ShaderProgram* shader_program;
     TextureCacheNode* textures[SHADER_MAX_TEXTURES];
 } rendering_state;
+
+static decltype(rsp) g_shadow_saved_rsp = {};
+static decltype(rdp) g_shadow_saved_rdp = {};
+static decltype(rendering_state) g_shadow_saved_rendering_state = {};
+static bool g_shadow_saved_water_material_enabled = false;
 
 /* These are copied only at the per-viewport scene marker. They contain the
  * RSP/RDP command state needed to replay the segment deterministically; the
@@ -556,7 +576,8 @@ extern "C" int gfx_get_render_mode(void) {
 }
 
 static bool gfx_world_lighting_enabled(void) {
-    return geWorldLightingEnabled(g_dynamic_lighting_enabled ? 1 : 0) != 0;
+    return geWorldLightingEnabledForRenderMode(
+               g_render_mode, g_dynamic_lighting_enabled ? 1 : 0, 0) != 0;
 }
 
 extern "C" void gfx_world_lighting_begin_frame(void) {
@@ -602,7 +623,12 @@ uint32_t gfx_msaa_level = 1;
 
 static bool dropped_frame;
 
-static float buf_vbo[MAX_BUFFERED * (32 * 3)]; // 3 vertices in a triangle and 32 floats per vtx
+/* The compatibility combiner can expose two texture coordinates, clamp
+ * bounds, fog/grayscale state, seven combiner inputs, view position, and the
+ * linear dynamic-light sidecar. Keep the staging stride above that complete
+ * generated-shader contract instead of relying on the old 32-float ceiling. */
+static constexpr size_t kMaxVertexFloats = 64;
+static float buf_vbo[MAX_BUFFERED * (kMaxVertexFloats * 3)];
 static size_t buf_vbo_len;
 static size_t buf_vbo_num_tris;
 
@@ -2277,6 +2303,9 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const Vtx* v = &vertices[i];
         struct LoadedVertex* d = &rsp.loaded_vertices[dest_index];
+        d->linear_dynamic_light[0] = 0.0f;
+        d->linear_dynamic_light[1] = 0.0f;
+        d->linear_dynamic_light[2] = 0.0f;
 
         /* GE's Vtx layout (include/PR/gbi.h): ob[] position, tc[] texture
          * coords, and the last 4 bytes are either RGBA (Vtx_t.cn) or a
@@ -2316,6 +2345,12 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
         d->source_view_x = d->view_x;
         d->source_view_y = d->view_y;
         d->source_view_z = d->view_z;
+        if (g_shadow_capture_active) {
+            /* The shadow replay needs view-space positions only. Avoid doing
+             * texture-coordinate generation, legacy lighting, and clipping
+             * work a second time for every source vertex. */
+            continue;
+        }
         d->reflection_plane_distance =
             g_water_reflection_plane_view[0] * d->source_view_x +
             g_water_reflection_plane_view[1] * d->source_view_y +
@@ -2424,9 +2459,19 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* verti
                     geDynamicLightContribution(
                         view_normal, view_position,
                         g_world_lights[light_index], contribution);
-                    r += contribution[0] * 255.0f;
-                    g += contribution[1] * 255.0f;
-                    b += contribution[2] * 255.0f;
+                    geDynamicLightAccumulateLinear(
+                        d->linear_dynamic_light, contribution);
+                    const float specular = geDynamicLightSpecular(
+                        view_normal, view_position,
+                        g_world_lights[light_index],
+                        kDynamicLightingMaterial);
+                    const float specular_contribution[3] = {
+                        specular * kDynamicLightingMaterial.specular_color[0],
+                        specular * kDynamicLightingMaterial.specular_color[1],
+                        specular * kDynamicLightingMaterial.specular_color[2],
+                    };
+                    geDynamicLightAccumulateLinear(
+                        d->linear_dynamic_light, specular_contribution);
                 }
             }
 
@@ -3455,10 +3500,67 @@ static size_t gfx_water_clip_reflection_triangle(
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx,
                         uint8_t vtx3_idx, bool is_rect);
 
+static bool gfx_sp_material_uses_alpha(void)
+{
+    const bool blend_alpha =
+        (rdp.other_mode_l & (3U << 20)) == (G_BL_CLR_MEM << 20) &&
+        (rdp.other_mode_l & (3U << 16)) == (G_BL_1MA << 16);
+    const bool coverage_alpha =
+        (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA;
+    return blend_alpha || coverage_alpha;
+}
+
+static bool gfx_sp_material_uses_texture_edge(void)
+{
+    const bool ac_decal =
+        (rdp.other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) ==
+        (2U << G_MDSFT_ALPHACOMPARE);
+    return (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA && !ac_decal;
+}
+
+static bool gfx_sp_shadow_material_has_alpha_cutout(void)
+{
+    const uint32_t alpha_compare =
+        rdp.other_mode_l & (3U << G_MDSFT_ALPHACOMPARE);
+    const bool alpha_compare_discards =
+        alpha_compare == G_AC_THRESHOLD || alpha_compare == G_AC_DITHER;
+    return alpha_compare_discards || gfx_sp_material_uses_texture_edge();
+}
+
 static void gfx_sp_tri1_vertices(struct LoadedVertex *v1,
                                  struct LoadedVertex *v2,
                                  struct LoadedVertex *v3,
                                  bool is_rect) {
+    if (g_shadow_capture_active) {
+        /* The shadow stream intentionally has no UV/material data, so skip
+         * blended and alpha-cutout surfaces rather than casting filled-card
+         * silhouettes. Read alpha policy from the current RDP state: the
+         * visible-pass cache in rendering_state may describe the prior tri. */
+        if (geShadowCasterEligible(gfx_sp_material_uses_alpha(),
+                                   gfx_sp_shadow_material_has_alpha_cutout(),
+                                   g_water_material_enabled,
+                                   rsp.P_matrix[3][3])) {
+            const LoadedVertex *vertices[3] = {v1, v2, v3};
+            if (g_shadow_capture_vertices.size() + 9 <=
+                geShadowMaximumVertexCount * 3) {
+                for (const LoadedVertex *vertex : vertices) {
+                    const float position[3] = {
+                        vertex->view_x, vertex->view_y, vertex->view_z,
+                    };
+                    if (!geShadowFinite3(position)) {
+                        g_shadow_capture_overflow = true;
+                        return;
+                    }
+                    g_shadow_capture_vertices.insert(
+                        g_shadow_capture_vertices.end(), position,
+                        position + 3);
+                }
+            } else {
+                g_shadow_capture_overflow = true;
+            }
+        }
+        return;
+    }
     if (g_water_reflection_replay && g_water_material_enabled) {
         /* Replay only opaque scene geometry. The source water fan is rendered
          * later by the composite and must not recursively enter its own
@@ -3743,14 +3845,12 @@ static void gfx_sp_tri1_vertices(struct LoadedVertex *v1,
     }
 
     uint64_t cc_options = 0;
-    bool use_alpha =
-        (rdp.other_mode_l & (3 << 20)) == (G_BL_CLR_MEM << 20) && (rdp.other_mode_l & (3 << 16)) == (G_BL_1MA << 16);
+    const bool use_alpha = gfx_sp_material_uses_alpha();
     const bool use_fog = ((rdp.other_mode_l >> 30) == G_BL_CLR_FOG) || ((rdp.other_mode_l >> 26) == G_BL_A_FOG);
     /* D266: G_AC_DECAL (alphacompare == 2) never discards, so it must not
      * take the texedge path at all; NONE/THRESHOLD/DITHER are distinguished
      * in gfx_opengl.cpp via the existing options. */
-    const bool ac_decal = (rdp.other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) == (2U << G_MDSFT_ALPHACOMPARE);
-    const bool texture_edge = (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA && !ac_decal;
+    const bool texture_edge = gfx_sp_material_uses_texture_edge();
     const bool use_noise = (rdp.other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) == G_AC_DITHER;
     const bool use_2cyc = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
     const bool alpha_threshold = (rdp.other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) == G_AC_THRESHOLD;
@@ -3758,10 +3858,6 @@ static void gfx_sp_tri1_vertices(struct LoadedVertex *v1,
     const bool use_grayscale = rdp.grayscale;
     const bool use_modulate = use_alpha && (rsp.extra_geometry_mode & G_MODULATE_EXT) != 0;
     const bool use_blur = (rdp.other_mode_h & (3U << G_MDSFT_TEXTFILT)) == G_TF_BLUR_EXT;
-
-    if ((rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA) {
-        use_alpha = true;
-    }
 
     if (use_alpha) {
         cc_options |= (uint64_t)SHADER_OPT_ALPHA;
@@ -3795,6 +3891,14 @@ static void gfx_sp_tri1_vertices(struct LoadedVertex *v1,
         if (g_render_mode >= GFX_RENDER_REMASTER) {
             cc_options |= (uint64_t)SHADER_OPT_WATER_REMASTER;
         }
+    }
+    const bool use_shadow_mapping =
+        g_shadow_map_enabled &&
+        geShadowReceiverEligible(g_render_mode >= GFX_RENDER_ENHANCED,
+                                 use_alpha, texture_edge, use_fog,
+                                 use_grayscale);
+    if (use_shadow_mapping) {
+        cc_options |= (uint64_t)SHADER_OPT_SHADOW_MAPPING;
     }
 
     // If we are not using alpha, clear the alpha components of the combiner as they have no effect
@@ -4078,9 +4182,12 @@ static void gfx_sp_tri1_vertices(struct LoadedVertex *v1,
     bool used_textures[2];
 
     gfx_rapi->shader_get_info(prg, &num_inputs, used_textures);
+    const GeFast3dMaterialRequirements material_requirements =
+        geFast3dMaterialRequirements(used_textures[0],
+                                     g_bump_maps_enabled ? 1 : 0,
+                                     use_shadow_mapping ? 1 : 0);
     const bool uses_view_position =
-        geFast3dMaterialUsesViewPosition(used_textures[0],
-                                          g_bump_maps_enabled ? 1 : 0) != 0;
+        material_requirements.uses_view_position != 0;
 
     struct GfxClipParameters clip_parameters = gfx_rapi->get_clip_parameters();
 
@@ -4094,6 +4201,9 @@ static void gfx_sp_tri1_vertices(struct LoadedVertex *v1,
         buf_vbo[buf_vbo_len++] = clip_parameters.invert_y ? -v_arr[i]->y : v_arr[i]->y;
         buf_vbo[buf_vbo_len++] = z;
         buf_vbo[buf_vbo_len++] = w;
+        buf_vbo[buf_vbo_len++] = v_arr[i]->linear_dynamic_light[0];
+        buf_vbo[buf_vbo_len++] = v_arr[i]->linear_dynamic_light[1];
+        buf_vbo[buf_vbo_len++] = v_arr[i]->linear_dynamic_light[2];
 
         if (uses_view_position) {
             buf_vbo[buf_vbo_len++] = v_arr[i]->view_x;
@@ -5342,6 +5452,13 @@ static void gfx_run_dl(Gfx* cmd) {
             return;
         }
         uint32_t opcode = cmd->words.w0 >> 24;
+        if (g_shadow_capture_active) {
+            /* The shadow pass consumes RSP geometry only. The shared policy
+             * skips RDP side effects while advancing over the entire packet. */
+            if (geShadowReplayAdvanceIgnoredCommand(cmd, opcode)) {
+                continue;
+            }
+        }
         // gfx_print_cmd(cmd);
         switch (opcode) {
                 // RSP commands:
@@ -5377,7 +5494,9 @@ static void gfx_run_dl(Gfx* cmd) {
                  * "not room background at all" (a different segment, e.g. a
                  * model/CPU-built-quad source) without guessing from source
                  * review alone. Remove once D236 pass 16 concludes. */
-                g_d236_last_vtx_seg = (uint8_t)(cmd->words.w1 >> 24);
+                if (!g_shadow_capture_active) {
+                    g_d236_last_vtx_seg = (uint8_t)(cmd->words.w1 >> 24);
+                }
                 gfx_sp_vertex(C0(0, 16) / sizeof(Vtx), C0(16, 4), (const Vtx*)seg_addr(cmd->words.w1));
                 break;
             case G_DL: {
@@ -5406,6 +5525,9 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_sp_extra_geometry_mode(~C0(0, 24), cmd->words.w1);
                 break;
             case G_BEGINWATERSCENE_EXT:
+                if (g_shadow_capture_active) {
+                    break;
+                }
                 gfx_flush();
                 g_water_scene_replay_start = cmd + 1;
                 g_water_scene_initial_rsp = rsp;
@@ -5418,7 +5540,7 @@ static void gfx_run_dl(Gfx* cmd) {
                  * physical water surface is the consumer of that reflection,
                  * not part of the reflected source, so do not append it a
                  * second time during replay. */
-                if (g_water_reflection_replay) {
+                if (g_shadow_capture_active || g_water_reflection_replay) {
                     break;
                 }
                 gfx_flush();
@@ -5430,6 +5552,10 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             }
             case G_SETWATERMATERIAL_EXT:
+                if (g_shadow_capture_active) {
+                    g_water_material_enabled = cmd->words.w1 != 0;
+                    break;
+                }
                 gfx_flush();
                 gfx_set_water_material(cmd->words.w1 != 0);
                 if (g_water_trace < 0) {
@@ -5442,6 +5568,10 @@ static void gfx_run_dl(Gfx* cmd) {
                 }
                 break;
             case G_RENDERWATERCOMPOSITE_EXT:
+                if (g_shadow_capture_active) {
+                    g_water_material_enabled = false;
+                    break;
+                }
                 gfx_flush();
                 /* Seed opt-in multiplayer water before reflection replay so
                  * the reflected camera sees the same registered plane as the
@@ -6182,6 +6312,51 @@ extern "C" void gfx_run(Gfx* commands) {
         gfx_wapi->swap_buffers_begin();
         return;
     }
+
+    g_shadow_map_enabled = false;
+    g_shadow_capture_vertices.clear();
+    g_shadow_capture_overflow = false;
+    if (g_render_mode >= GFX_RENDER_ENHANCED && commands != nullptr &&
+        getenv("GE_SKIP_RENDER") == nullptr && getenv("GE_SKIP_DL") == nullptr &&
+        gfx_rapi->begin_shadow_scene_capture != nullptr &&
+        gfx_rapi->end_shadow_scene_capture != nullptr &&
+        gfx_rapi->render_shadow_map != nullptr &&
+        gfx_rapi->begin_shadow_scene_capture()) {
+        g_shadow_saved_rsp = rsp;
+        g_shadow_saved_rdp = rdp;
+        g_shadow_saved_rendering_state = rendering_state;
+        g_shadow_saved_water_material_enabled = g_water_material_enabled;
+        std::memcpy(g_shadow_saved_segments, segmentPointers,
+                    sizeof(g_shadow_saved_segments));
+        g_shadow_capture_active = true;
+        gfx_sp_reset();
+        gfx_run_dl(commands);
+        g_shadow_capture_active = false;
+        gfx_rapi->end_shadow_scene_capture();
+
+        rsp = g_shadow_saved_rsp;
+        rdp = g_shadow_saved_rdp;
+        rendering_state = g_shadow_saved_rendering_state;
+        std::memcpy(segmentPointers, g_shadow_saved_segments,
+                    sizeof(g_shadow_saved_segments));
+        rendering_state.shader_program = nullptr;
+        rendering_state.textures[0] = nullptr;
+        rendering_state.textures[1] = nullptr;
+        rdp.textures_changed[0] = true;
+        rdp.textures_changed[1] = true;
+        g_water_material_enabled = g_shadow_saved_water_material_enabled;
+        gfx_sp_reset();
+
+        if (!g_shadow_capture_overflow &&
+            g_shadow_capture_vertices.size() >= 9 &&
+            g_shadow_capture_vertices.size() % 9 == 0) {
+            g_shadow_map_enabled = gfx_rapi->render_shadow_map(
+                g_shadow_capture_vertices.data(),
+                g_shadow_capture_vertices.size() / 3,
+                geShadowDefaultLightDirection);
+        }
+    }
+
     gfx_rapi->start_draw_to_framebuffer(game_renders_to_framebuffer ? game_framebuffer : 0,
                                         (float)gfx_current_dimensions.height / SCREEN_HEIGHT);
     gfx_rapi->clear_framebuffer(true, false);

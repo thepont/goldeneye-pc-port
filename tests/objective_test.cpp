@@ -1,5 +1,6 @@
 /* Deterministic tests for objective/tag list ownership and lookup. */
 #include <array>
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -142,6 +143,8 @@ struct ObjectiveRuntime
 };
 
 ObjectiveRuntime g_objective_runtime;
+int g_sync_printf_count = 0;
+std::string g_last_sync_printf;
 
 constexpr std::size_t kObjectiveCriterionStride = 24;
 constexpr std::uint32_t kNullTextID = 0x7fffffffU;
@@ -394,8 +397,16 @@ void hudmsgBottomShow(char *message)
     g_objective_runtime.last_hud = message == nullptr ? "" : message;
 }
 
-std::int32_t osSyncPrintf(const char *, ...)
+std::int32_t osSyncPrintf(const char *format, ...)
 {
+    char buffer[512];
+    va_list args;
+
+    ++g_sync_printf_count;
+    va_start(args, format);
+    std::vsnprintf(buffer, sizeof(buffer), format == nullptr ? "" : format, args);
+    va_end(args);
+    g_last_sync_printf = buffer;
     return 0;
 }
 
@@ -824,12 +835,16 @@ void test_objective_completion_and_status_display(TestState &tests)
     set_objective_difficulty(logged, 0);
     install_objective(logged);
     g_savelogObjOnce = 1;
+    g_sync_printf_count = 0;
+    g_last_sync_printf.clear();
     ::setenv("GE_SAVELOG", "1", 1);
     (void)get_status_of_objective(0);
     (void)objectiveIsAllComplete();
     ::unsetenv("GE_SAVELOG");
     g_savelogObjOnce = 0;
-    tests.expect(true, "objective save-log diagnostics are safely injectable");
+    tests.expect(g_sync_printf_count > 0 &&
+                     g_last_sync_printf.find("SAVELOG:") != std::string::npos,
+                 "enabled objective save-log diagnostics emit a trace");
 
     clear_objective_state();
     FakeObjectiveBuffer completed;

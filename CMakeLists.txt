@@ -664,6 +664,39 @@ if(BUILD_TESTING)
   add_test(NAME ge007_dynamic_lighting
            COMMAND ge007_dynamic_lighting_test)
 
+  add_executable(ge007_advanced_lighting_contract_test
+    tests/advanced_lighting_contract_test.cpp)
+  target_compile_definitions(ge007_advanced_lighting_contract_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  target_compile_features(ge007_advanced_lighting_contract_test PRIVATE
+    cxx_std_20)
+  add_test(NAME ge007_advanced_lighting_contract
+           COMMAND ge007_advanced_lighting_contract_test)
+  set_tests_properties(ge007_advanced_lighting_contract
+    PROPERTIES LABELS "ge007-red")
+
+  add_executable(ge007_advanced_lighting_policy_test
+    tests/advanced_lighting_policy_test.cpp)
+  target_include_directories(ge007_advanced_lighting_policy_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/port/fast3d")
+  target_compile_features(ge007_advanced_lighting_policy_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_advanced_lighting_policy
+           COMMAND ge007_advanced_lighting_policy_test)
+
+  add_executable(ge007_shadow_mapping_policy_test
+    tests/shadow_mapping_policy_test.cpp)
+  target_compile_features(ge007_shadow_mapping_policy_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_shadow_mapping_policy
+           COMMAND ge007_shadow_mapping_policy_test)
+
+  add_executable(ge007_shadow_mapping_contract_test
+    tests/shadow_mapping_contract_test.cpp)
+  target_compile_features(ge007_shadow_mapping_contract_test PRIVATE cxx_std_20)
+  target_compile_definitions(ge007_shadow_mapping_contract_test PRIVATE
+    GE007_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  add_test(NAME ge007_shadow_mapping_contract
+           COMMAND ge007_shadow_mapping_contract_test)
+
   add_executable(ge007_explosion_effect_test
     tests/explosion_effect_test.cpp)
   target_compile_features(ge007_explosion_effect_test PRIVATE cxx_std_20)
@@ -1142,6 +1175,14 @@ if(BUILD_TESTING)
     cxx_std_17)
   add_test(NAME ge007_water_render_pixel_oracle
            COMMAND ge007_water_render_pixel_oracle_test --self-test)
+
+  add_executable(ge007_model_render_pixel_oracle_test
+    tests/model_render_pixel_oracle_test.cpp)
+  target_include_directories(ge007_model_render_pixel_oracle_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/tests")
+  target_compile_features(ge007_model_render_pixel_oracle_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_model_render_pixel_oracle
+           COMMAND ge007_model_render_pixel_oracle_test --self-test)
 
   add_executable(ge007_water_render_quality_contract_test
     tests/water_render_quality_contract_test.cpp)
@@ -2117,6 +2158,8 @@ if(BUILD_TESTING)
 
   set_tests_properties(
     ge007_dynamic_lighting
+    ge007_advanced_lighting_policy
+    ge007_shadow_mapping_policy
     ge007_explosion_effect
     ge007_vector_text_frame
     ge007_vector_text_font_assets
@@ -2161,6 +2204,7 @@ if(BUILD_TESTING)
     ge007_water_heightfield_policy
     ge007_water_heightfield_integration_contract
     ge007_water_cpu_render_harness
+    ge007_model_render_pixel_oracle
     PROPERTIES LABELS ge007-unit)
   set_tests_properties(
     ge007_defect_contract
@@ -2247,6 +2291,9 @@ if(BUILD_TESTING)
     ge007_options_overlay
     PROPERTIES LABELS ge007-unit)
 
+  set_tests_properties(ge007_shadow_mapping_contract
+    PROPERTIES LABELS ge007-contract)
+
   # These are deliberately red-first contracts for live water features that
   # still need renderer/fixture implementation. Keep them visible and
   # runnable, but do not let an intentional TDD red state poison the green
@@ -2260,6 +2307,8 @@ if(BUILD_TESTING)
   if(GE007_ENABLE_COVERAGE)
     set(_GE007_UNIT_TEST_TARGETS
       ge007_dynamic_lighting_test
+      ge007_advanced_lighting_policy_test
+      ge007_shadow_mapping_policy_test
       ge007_explosion_effect_test
       ge007_vector_text_frame_test
       ge007_vector_text_font_assets_test
@@ -2306,9 +2355,10 @@ if(BUILD_TESTING)
       ge007_water_heightfield_integration_contract_test
     ge007_water_render_policy_test
     ge007_water_render_reference_math_test
-    ge007_water_time_policy_test
-    ge007_water_cpu_render_harness_test
-    ge007_water_render_pixel_oracle_test
+      ge007_water_time_policy_test
+      ge007_water_cpu_render_harness_test
+      ge007_model_render_pixel_oracle_test
+      ge007_water_render_pixel_oracle_test
       ge007_water_render_bdd_contract_test
       ge007_world_water_surface_contract_test
       ge007_muzzle_flash_contract_test

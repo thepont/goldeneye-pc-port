@@ -42,6 +42,7 @@ enum {
 #define SHADER_OPT_BLUR (1 << 12)
 #define SHADER_OPT_WATER (1 << 13)
 #define SHADER_OPT_WATER_REMASTER (1 << 14)
+#define SHADER_OPT_SHADOW_MAPPING (1 << 15)
 
 struct ColorCombinerKey {
     uint64_t combine_mode;

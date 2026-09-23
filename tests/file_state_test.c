@@ -1,11 +1,17 @@
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <ultra64.h>
 #include "file.h"
 #include "file2.h"
 #include "front.h"
+
+#ifdef PORT
+extern int setenv(const char *name, const char *value, int overwrite);
+extern int unsetenv(const char *name);
+#endif
 
 s32 selected_folder_num;
 s32 selected_folder_num_copy;
@@ -245,6 +251,50 @@ static void test_briefing_unlock_guards_and_success(void)
            "mission briefing guards invalid, 007, and cheat-run paths");
 }
 
+static void GivenMissionTimeExceedsTarget_WhenEndingBriefing_ThenProgressIsRecordedWithoutSavingCheat(void)
+{
+    /* Arrange */
+    reset_fixture();
+    briefingpage = 0;
+    selected_difficulty = DIFFICULTY_AGENT;
+    fake_mission_timer = 11 * GAME_TICKRATE;
+
+    /* Act */
+    end_of_mission_briefing();
+
+    /* Assert */
+    expect(last_unlock_folder == 2 &&
+               last_unlock_stage == 4 &&
+               last_unlock_difficulty == DIFFICULTY_AGENT &&
+               last_unlock_time == 11,
+           "an over-target mission still records stage progress with elapsed seconds");
+    expect(save_cheat_calls == 0 && g_NewCheatUnlocked == FALSE,
+           "an over-target mission does not save or report a newly unlocked cheat");
+}
+
+static void GivenSaveLoggingIsEnabled_WhenEndingBriefing_ThenUnlockBehaviorIsUnchanged(void)
+{
+    /* Arrange */
+    reset_fixture();
+    briefingpage = 0;
+    selected_difficulty = DIFFICULTY_AGENT;
+    fake_mission_timer = 600;
+    unsetenv("GE_SAVELOG");
+    expect(setenv("GE_SAVELOG", "1", 1) == 0,
+           "save logging can be enabled for the diagnostic-path test");
+
+    /* Act */
+    end_of_mission_briefing();
+
+    /* Teardown */
+    unsetenv("GE_SAVELOG");
+
+    /* Assert */
+    expect(unlock_calls == 1 && save_cheat_calls == 1 &&
+               g_NewCheatUnlocked == TRUE,
+           "save logging does not change mission unlock behavior");
+}
+
 static void test_selected_state_and_wrappers(void)
 {
     save_data copy;
@@ -294,6 +344,8 @@ int main(void)
 {
     test_007_modifiers();
     test_briefing_unlock_guards_and_success();
+    GivenMissionTimeExceedsTarget_WhenEndingBriefing_ThenProgressIsRecordedWithoutSavingCheat();
+    GivenSaveLoggingIsEnabled_WhenEndingBriefing_ThenUnlockBehaviorIsUnchanged();
     test_selected_state_and_wrappers();
 
     if (failures != 0)

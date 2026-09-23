@@ -34,6 +34,7 @@
 #include "../fast3d/gfx_api.h"
 #include "../fast3d/gfx_sdl.h"
 #include "../fast3d/gfx_opengl.h"
+#include "../fast3d/world_lighting_policy.h"
 #include "world_lighting.h"
 #include "../fast3d/explosion_effect_policy.h"
 
@@ -327,14 +328,16 @@ static void videoApplyImageOptions(void)
     const int disable_dynamic_lighting =
         getenv("GE_DISABLE_DYNAMIC_LIGHTING") != NULL;
     const int disable_bump_maps = getenv("GE_DISABLE_BUMP_MAPS") != NULL;
+    const int render_mode = videoEffectiveRenderMode();
     portFovScale = (f32)cfgFovScale / 100.0f;
-    gfx_set_render_mode(videoEffectiveRenderMode());
+    gfx_set_render_mode(render_mode);
     gfx_set_bump_maps_path(sysResolvePath(cfgBumpMapsPath));
     gfx_set_bump_maps_enabled(!disable_bump_maps && cfgBumpMaps &&
-                               videoEffectiveRenderMode() >= GFX_RENDER_ENHANCED);
+                               render_mode >= GFX_RENDER_ENHANCED);
     gfx_set_anisotropy_level(cfgAniso);
     gfx_set_safe_area_crop(cfgSafeAreaCrop);
-    gfx_set_dynamic_lighting(!disable_dynamic_lighting && cfgDynamicLighting);
+    gfx_set_dynamic_lighting(geWorldLightingEnabledForRenderMode(
+        render_mode, cfgDynamicLighting, disable_dynamic_lighting));
 }
 
 static void videoApplyTexFilter(void)
@@ -769,23 +772,30 @@ void videoSubmitCommands(Gfx *cmds)
  * the swap is undefined on buffer-exchange drivers (Mesa/WSLg) -> black. */
 static void videoPreSwapCapture(void)
 {
-    /* GE_PCDUMP="first-last" / "first-last:step" -> ./ppm/frame_NNNNNN.ppm.
+    /* GE_PCDUMP="first-last" / "first-last:step" -> frame_NNNNNN.ppm.
+     * GE_PCDUMP_DIR selects an isolated output directory; the legacy default
+     * remains ./ppm.
      * Also honours [Debug] FrameDump in ge007.ini (env var wins). */
     const char *pcdump = configGetFrameDump();
     if (pcdump) {
         static int lo = -1, hi = 0, step = 1;
+        const char *dump_dir = getenv("GE_PCDUMP_DIR");
+        if (dump_dir == NULL || dump_dir[0] == '\0') {
+            dump_dir = "ppm";
+        }
         if (lo < 0) {
             const char *v = pcdump;
             lo = 1; hi = 0x7fffffff; step = 1;
             sscanf(v, "%d-%d:%d", &lo, &hi, &step);
             if (sscanf(v, "%d-%d", &lo, &hi) != 2)
                 hi = 0x7fffffff;
-            GE_MKDIR("ppm");
+            GE_MKDIR(dump_dir);
         }
         if ((int)frames >= lo && (int)frames <= hi &&
             ((int)frames - lo) % step == 0) {
-            char path[128];
-            snprintf(path, sizeof(path), "ppm/frame_%06d.ppm", (int)frames);
+            char path[512];
+            snprintf(path, sizeof(path), "%s/frame_%06d.ppm", dump_dir,
+                     (int)frames);
             gfx_opengl_dump_bound_fbo((uint32_t)gfx_current_dimensions.width,
                                       (uint32_t)gfx_current_dimensions.height, path);
         }

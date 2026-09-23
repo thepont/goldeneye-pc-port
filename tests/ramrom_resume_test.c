@@ -23,6 +23,8 @@ extern void copy_recorded_ramrom_registers_to_proper_place_ingame(
 extern void clear_ramrom_block_buffer_heading_ptrs(void);
 extern void setRamRomRecordSlot(s32 slot);
 extern void replay_recorded_ramrom_at_address(ramromfilestructure *demofile);
+extern void replay_recorded_ramrom_from_indy(void);
+extern void select_ramrom_to_play(void);
 extern void ramromFadeToTitle(void);
 extern void record_player_input_as_packet(struct contsample *samples,
                                           s32 first, s32 last);
@@ -44,21 +46,24 @@ extern s32 recording_ramrom_flag;
 extern s32 g_ramromRecordFlag;
 extern s32 is_ramrom_flag;
 
-/* RAM/ROM symbols normally supplied by generated ROM assets. */
-u32 *ramrom_Dam_1;
-u32 *ramrom_Dam_2;
-u32 *ramrom_Facility_1;
-u32 *ramrom_Facility_2;
-u32 *ramrom_Facility_3;
-u32 *ramrom_Runway_1;
-u32 *ramrom_Runway_2;
-u32 *ramrom_BunkerI_1;
-u32 *ramrom_BunkerI_2;
-u32 *ramrom_Silo_1;
-u32 *ramrom_Silo_2;
-u32 *ramrom_Frigate_1;
-u32 *ramrom_Frigate_2;
-u32 *ramrom_Train;
+/* RAM/ROM symbols normally supplied by generated ROM assets.  The production
+ * declarations are linker addresses, so fixed byte storage models those
+ * addresses without depending on the generated asset linker script. */
+enum { RAMROM_ASSET_WORDS = 0x100 };
+u32 ramrom_Dam_1[RAMROM_ASSET_WORDS];
+u32 ramrom_Dam_2[RAMROM_ASSET_WORDS];
+u32 ramrom_Facility_1[RAMROM_ASSET_WORDS];
+u32 ramrom_Facility_2[RAMROM_ASSET_WORDS];
+u32 ramrom_Facility_3[RAMROM_ASSET_WORDS];
+u32 ramrom_Runway_1[RAMROM_ASSET_WORDS];
+u32 ramrom_Runway_2[RAMROM_ASSET_WORDS];
+u32 ramrom_BunkerI_1[RAMROM_ASSET_WORDS];
+u32 ramrom_BunkerI_2[RAMROM_ASSET_WORDS];
+u32 ramrom_Silo_1[RAMROM_ASSET_WORDS];
+u32 ramrom_Silo_2[RAMROM_ASSET_WORDS];
+u32 ramrom_Frigate_1[RAMROM_ASSET_WORDS];
+u32 ramrom_Frigate_2[RAMROM_ASSET_WORDS];
+u32 ramrom_Train[RAMROM_ASSET_WORDS];
 
 u64 g_randomSeed;
 u64 g_chrObjRandomSeed;
@@ -83,6 +88,8 @@ s32 prev_keypresses;
 
 static s32 fake_controller_count;
 static GAMEMODE fake_resume_mode;
+static LEVEL_SOLO_SEQUENCE fake_highest_unlocked_stage;
+static u32 fake_random_value;
 static s32 fake_weapon_set;
 static s32 fake_flags[MAX_MULTIPLAYER];
 static s32 fake_camera_mode;
@@ -141,6 +148,20 @@ static void expect_u64(u64 actual, u64 expected, const char *message)
 static void reset_fixture(void)
 {
     memset(ramrom_data_target, 0, sizeof(ramrom_data_target));
+    memset(ramrom_Dam_1, 0, sizeof(ramrom_Dam_1));
+    memset(ramrom_Dam_2, 0, sizeof(ramrom_Dam_2));
+    memset(ramrom_Facility_1, 0, sizeof(ramrom_Facility_1));
+    memset(ramrom_Facility_2, 0, sizeof(ramrom_Facility_2));
+    memset(ramrom_Facility_3, 0, sizeof(ramrom_Facility_3));
+    memset(ramrom_Runway_1, 0, sizeof(ramrom_Runway_1));
+    memset(ramrom_Runway_2, 0, sizeof(ramrom_Runway_2));
+    memset(ramrom_BunkerI_1, 0, sizeof(ramrom_BunkerI_1));
+    memset(ramrom_BunkerI_2, 0, sizeof(ramrom_BunkerI_2));
+    memset(ramrom_Silo_1, 0, sizeof(ramrom_Silo_1));
+    memset(ramrom_Silo_2, 0, sizeof(ramrom_Silo_2));
+    memset(ramrom_Frigate_1, 0, sizeof(ramrom_Frigate_1));
+    memset(ramrom_Frigate_2, 0, sizeof(ramrom_Frigate_2));
+    memset(ramrom_Train, 0, sizeof(ramrom_Train));
     memset(player_char, 0, sizeof(player_char));
     memset(player_handicap, 0, sizeof(player_handicap));
     memset(controlstyle_player, 0, sizeof(controlstyle_player));
@@ -148,6 +169,8 @@ static void reset_fixture(void)
 
     fake_controller_count = 1;
     fake_resume_mode = GAMEMODE_SOLO;
+    fake_highest_unlocked_stage = SP_LEVEL_DAM;
+    fake_random_value = 0;
     fake_weapon_set = 0;
     fake_flags[0] = 10;
     fake_flags[1] = 20;
@@ -202,6 +225,16 @@ static void reset_fixture(void)
 s8 joyGetControllerCount(void)
 {
     return (s8)fake_controller_count;
+}
+
+LEVEL_SOLO_SEQUENCE fileGetHighestStageUnlockedAnyFolder(void)
+{
+    return fake_highest_unlocked_stage;
+}
+
+u32 randomGetNext(void)
+{
+    return fake_random_value;
 }
 
 int geCoopResumeMode(int saved_mode, int controller_count,
@@ -361,6 +394,74 @@ static void put_be64(u8 *bytes, size_t offset, u64 value)
 {
     put_be32(bytes, offset, (u32)(value >> 32));
     put_be32(bytes, offset + 4, (u32)value);
+}
+
+static void write_replay_asset(u32 *asset, u32 stage, u32 difficulty)
+{
+    memset(asset, 0, RAMROM_ASSET_WORDS * sizeof(*asset));
+    put_be32((u8 *)asset, offsetof(ramromfilestructure, stagenum), stage);
+    put_be32((u8 *)asset, offsetof(ramromfilestructure, difficulty), difficulty);
+}
+
+static void GivenIndyReplayHeader_WhenReplayStarts_ThenTheSavedStageIsQueued(void)
+{
+    /* Arrange */
+    reset_fixture();
+    put_be32(fake_indy_ramrom, offsetof(ramromfilestructure, stagenum), 19);
+    put_be32(fake_indy_ramrom, offsetof(ramromfilestructure, difficulty),
+             DIFFICULTY_AGENT);
+
+    /* Act */
+    replay_recorded_ramrom_from_indy();
+
+    /* Assert */
+    expect_true(ptr_active_demofile != NULL,
+                "the Indy replay entry point copies a replay header");
+    expect_s32(fake_selected_stage, 19,
+               "the Indy replay entry point selects the saved stage");
+    expect_s32(fake_selected_difficulty, DIFFICULTY_AGENT,
+               "the Indy replay entry point selects the saved difficulty");
+    expect_s32(g_ramromPlayBackFlag, 1,
+               "the Indy replay entry point arms playback");
+    expect_s32(fake_front_menu, MENU_RUN_STAGE,
+               "the Indy replay entry point routes to the run-stage menu");
+}
+
+static void GivenAttractReplayAssets_WhenAnAttractDemoIsSelected_ThenAReplayIsQueued(void)
+{
+    /* Arrange */
+    reset_fixture();
+    write_replay_asset(ramrom_Dam_1, 100, DIFFICULTY_00);
+    write_replay_asset(ramrom_Dam_2, 101, DIFFICULTY_00);
+    write_replay_asset(ramrom_Facility_1, 102, DIFFICULTY_00);
+    write_replay_asset(ramrom_Facility_2, 103, DIFFICULTY_00);
+    write_replay_asset(ramrom_Facility_3, 104, DIFFICULTY_00);
+    write_replay_asset(ramrom_Runway_1, 105, DIFFICULTY_00);
+    write_replay_asset(ramrom_Runway_2, 106, DIFFICULTY_00);
+    write_replay_asset(ramrom_BunkerI_1, 107, DIFFICULTY_00);
+    write_replay_asset(ramrom_BunkerI_2, 108, DIFFICULTY_00);
+    write_replay_asset(ramrom_Silo_1, 109, DIFFICULTY_00);
+    write_replay_asset(ramrom_Silo_2, 110, DIFFICULTY_00);
+    write_replay_asset(ramrom_Frigate_1, 111, DIFFICULTY_00);
+    write_replay_asset(ramrom_Frigate_2, 112, DIFFICULTY_00);
+    write_replay_asset(ramrom_Train, 113, DIFFICULTY_00);
+    fake_highest_unlocked_stage = (LEVEL_SOLO_SEQUENCE)113;
+    fake_random_value = 13;
+
+    /* Act */
+    select_ramrom_to_play();
+
+    /* Assert */
+    expect_true(fake_selected_stage >= 100 && fake_selected_stage <= 113,
+                "attract-demo selection queues one of the available demos");
+    expect_s32(fake_selected_stage, 113,
+               "attract-demo selection uses the selected random demo");
+    expect_s32(fake_selected_difficulty, DIFFICULTY_00,
+               "attract-demo selection carries the demo difficulty");
+    expect_s32(g_ramromPlayBackFlag, 1,
+               "attract-demo selection arms playback");
+    expect_s32(fake_front_menu, MENU_RUN_STAGE,
+               "attract-demo selection routes to the run-stage menu");
 }
 
 static void test_recorded_coop_falls_back_to_one_player_with_one_controller(void)
@@ -876,6 +977,21 @@ static void test_devtool_and_recording_stop_contracts(void)
                 "recording finalization writes the terminator and refreshed header");
 }
 
+static void GivenDevtoolReplayIsMissing_WhenReplayLoadIsRequested_ThenPlaybackStateStaysUntouched(void)
+{
+    /* Arrange */
+    reset_fixture();
+
+    /* Act */
+    load_ramrom_from_devtool();
+
+    /* Assert */
+    expect_s32(fake_ramrom_load_calls, 0,
+               "a missing devtool replay is not loaded");
+    expect_true(ptr_active_demofile == NULL,
+                "a missing devtool replay does not create an active demo");
+}
+
 static void test_stage_load_sets_up_recording_and_playback_callbacks(void)
 {
     ramromfilestructure playback_state;
@@ -961,6 +1077,29 @@ static void test_stop_demo_playback_restores_state_and_clears_callbacks(void)
                "stopping playback returns to live controller data");
 }
 
+static void GivenRecordingIsActive_WhenStopDemoPlaybackIsRequested_ThenRecordingIsFinalized(void)
+{
+    /* Arrange */
+    reset_fixture();
+    address_demo_loaded = (u8 *)(uintptr_t)INDY_RAMROM_DEMO_ADDRESS;
+    ramrom_demo_related_6 = 1;
+    ramrom_demo_related_3 = 1;
+    recording_ramrom_flag = 1;
+
+    /* Act */
+    stop_demo_playback();
+
+    /* Assert */
+    expect_s32(ramrom_demo_related_6, 0,
+               "an active recording is finalized before playback shutdown");
+    expect_s32(recording_ramrom_flag, 0,
+               "playback shutdown clears the active recording state");
+    expect_true(fake_record_callback == NULL,
+                "playback shutdown unregisters the recording callback");
+    expect_s32(ramrom_demo_related_3, 1,
+               "playback state is left untouched when recording owns the device");
+}
+
 int main(void)
 {
     test_recorded_coop_falls_back_to_one_player_with_one_controller();
@@ -969,13 +1108,17 @@ int main(void)
     test_current_options_are_serialized_for_resume();
     test_replay_flags_and_block_headings_reset_cleanly();
     test_replay_header_is_byte_swapped_before_menu_transition();
+    GivenIndyReplayHeader_WhenReplayStarts_ThenTheSavedStageIsQueued();
+    GivenAttractReplayAssets_WhenAnAttractDemoIsSelected_ThenAReplayIsQueued();
     test_replay_fade_request_is_idempotent();
     test_replay_activity_flag_reports_the_active_slot();
     test_record_and_playback_round_trip_controller_packets();
     test_iterating_replay_entries_copies_packets_and_handles_empty_entries();
     test_devtool_and_recording_stop_contracts();
+    GivenDevtoolReplayIsMissing_WhenReplayLoadIsRequested_ThenPlaybackStateStaysUntouched();
     test_stage_load_sets_up_recording_and_playback_callbacks();
     test_stop_demo_playback_restores_state_and_clears_callbacks();
+    GivenRecordingIsActive_WhenStopDemoPlaybackIsRequested_ThenRecordingIsFinalized();
 
     expect_true(failures == 0, "all RAM/ROM resume tests pass");
     return failures == 0 ? 0 : 1;

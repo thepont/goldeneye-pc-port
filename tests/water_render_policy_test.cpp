@@ -91,6 +91,20 @@ static void test_feature_switches(FailureLog &failures)
                     "foam diagnostic switch must be able to disable foam");
 }
 
+static void test_framebuffer_srgb_capability(FailureLog &failures)
+{
+    failures.expect(!geWaterFramebufferSrgbControlAvailable(1, 0, 0, 0),
+                    "GLES without sRGB write control must not query or toggle that capability");
+    failures.expect(geWaterFramebufferSrgbControlAvailable(1, 0, 0, 1),
+                    "GLES may control framebuffer sRGB only with its optional write-control extension");
+    failures.expect(geWaterFramebufferSrgbControlAvailable(0, 1, 0, 0),
+                    "desktop core framebuffer sRGB must be supported");
+    failures.expect(geWaterFramebufferSrgbControlAvailable(0, 0, 1, 0),
+                    "desktop framebuffer sRGB extensions must be supported");
+    failures.expect(!geWaterFramebufferSrgbControlAvailable(0, 0, 0, 0),
+                    "desktop contexts without framebuffer sRGB support must not toggle it");
+}
+
 static void test_low_light_water_visibility(FailureLog &failures)
 {
     const GeWaterVec3 black = {0.0f, 0.0f, 0.0f};
@@ -936,6 +950,7 @@ int main()
     FailureLog failures;
     test_display_transfer(failures);
     test_feature_switches(failures);
+    test_framebuffer_srgb_capability(failures);
     test_low_light_water_visibility(failures);
     test_render_tiers(failures);
     test_scalar_and_projective_bounds(failures);

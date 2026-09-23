@@ -23,6 +23,19 @@ static inline int geWorldLightingEnabled(int toggle)
     return toggle != 0;
 }
 
+/* Port-owned dynamic lights are an enhanced-rendering feature. Keep the
+ * render-mode gate here, beside the compatibility toggle policy, so callers
+ * cannot accidentally enable them while the Original renderer is selected.
+ * The mode values are the public GFX_RENDER_* values: Original=0,
+ * Enhanced=1, Remaster=2. */
+static inline int geWorldLightingEnabledForRenderMode(int render_mode,
+                                                      int configured,
+                                                      int environment_disabled)
+{
+    const int enhanced_or_remaster = render_mode == 1 || render_mode == 2;
+    return enhanced_or_remaster && configured != 0 && environment_disabled == 0;
+}
+
 static inline float geWorldLightingClamp(float value, float minimum, float maximum)
 {
     if (value < minimum) {

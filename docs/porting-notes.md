@@ -322,6 +322,15 @@ expressed in N64 `Gfx`/`Vtx` units is **half-size** on PC.
   under `#ifdef PORT`. When you fix one `arr[i<<2]` pointer-array site, grep
   the whole file; these travel in packs.
 
+- **Skipping a command in a display-list walker must advance its packet.** A
+  `continue` in a pre-dispatch filter bypasses the walker's shared `++cmd`;
+  an ignored one-slot opcode then repeats forever, while multi-slot commands
+  need their exact extra-slot count. Keep skip-width policy in the production
+  walker and test a bounded synthetic stream ending in `G_ENDDL` through the
+  same cursor-advance helper that production calls. A separate test-only loop
+  with its own advancement logic can reproduce the symptom without proving
+  the production walker moves its cursor.
+
 ## C. Big-endian rodata / ROM data read on little-endian PC
 
 ROM assets and compiled-in `.rodata` are big-endian. Anything not run

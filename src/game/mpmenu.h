@@ -33,6 +33,7 @@ extern s32 g_gameOverFlag;
 
 s32 mpwatchMenuCanGoRight(void);
 s32 mpwatchMenuCanGoLeft(void);
+void mpwatchMenuTick(void);
 void mpwatchUnpauseGame(void);
 s32 mpFindMaxInt(s32 numplayers, s32 value0, s32 value1, s32 value2, s32 value3);
 s32 mpFindMinInt(s32 numplayers, s32 value0, s32 value1, s32 value2, s32 value3);

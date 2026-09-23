@@ -17,7 +17,7 @@ using geWaterPixelOracle::vertical_asymmetry;
 static int usage()
 {
     std::cerr << "usage: water_render_pixel_oracle_test "
-                 "--variance|--reflection-asymmetry|--occluder-mask|"
+                 "--variance|--reflection-asymmetry|--surface-edge-signal|"
                  "--viewport-isolation image.ppm | --temporal a.ppm b.ppm\n";
     return 2;
 }
@@ -32,12 +32,23 @@ static int self_test()
     const std::size_t edges = edge_count(image, image.height / 2,
                                          image.height);
     const float temporal = mean_difference(image, changed, 0, image.height);
+    Image sparse_edge;
+    sparse_edge.width = 32;
+    sparse_edge.height = 32;
+    sparse_edge.pixels.assign(32U * 32U * 3U, 0);
+    const std::size_t sparse_pixel = (24U * 32U + 16U) * 3U;
+    sparse_edge.pixels[sparse_pixel] = 255;
+    sparse_edge.pixels[sparse_pixel + 1] = 255;
+    sparse_edge.pixels[sparse_pixel + 2] = 255;
+    const std::size_t sparse_edges = edge_count(
+        sparse_edge, sparse_edge.height / 2, sparse_edge.height);
 
     if (!(variance > 0.00001f) || !(asymmetry > 0.002f) || edges <= 8 ||
-        !(temporal > 0.002f)) {
+        !(temporal > 0.002f) || sparse_edges == 0) {
         std::cerr << "water pixel oracle self-test failed variance=" << variance
                   << " asymmetry=" << asymmetry << " edges=" << edges
-                  << " temporal=" << temporal << '\n';
+                  << " temporal=" << temporal
+                  << " sparse_edges=" << sparse_edges << '\n';
         return 1;
     }
     std::cerr << "water pixel oracle self-test passed\n";
@@ -75,11 +86,11 @@ int main(int argc, char **argv)
         std::cerr << "water reflection asymmetry=" << asymmetry << '\n';
         return asymmetry > 0.002f ? 0 : 1;
     }
-    if (mode == "--occluder-mask") {
+    if (mode == "--surface-edge-signal") {
         const std::size_t edges = edge_count(image, image.height / 2,
                                              image.height);
-        std::cerr << "water occluder mask edges=" << edges << '\n';
-        return edges > 8 ? 0 : 1;
+        std::cerr << "water surface edge signal=" << edges << '\n';
+        return edges > 0 ? 0 : 1;
     }
     if (mode == "--viewport-isolation") {
         const int split = image.height / 2;

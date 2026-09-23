@@ -12,10 +12,79 @@ static bool near(float actual, float expected, float epsilon = 0.0001f)
     return std::fabs(actual - expected) <= epsilon;
 }
 
+static bool GivenNullContribution_WhenAccumulatingLinearLight_ThenTargetRemainsUnchanged()
+{
+    /* Arrange */
+    float target[3] = {0.25f, 0.5f, 0.75f};
+
+    /* Act */
+    geDynamicLightAccumulateLinear(target, nullptr);
+
+    /* Assert */
+    return near(target[0], 0.25f) && near(target[1], 0.5f) && near(target[2], 0.75f);
+}
+
+static bool GivenNullTarget_WhenAccumulatingLinearLight_ThenCallIsSafe()
+{
+    /* Arrange */
+    const float contribution[3] = {0.25f, 0.5f, 0.75f};
+
+    /* Act */
+    geDynamicLightAccumulateLinear(nullptr, contribution);
+
+    /* Assert */
+    return true;
+}
+
 int main()
 {
+    if (!GivenNullContribution_WhenAccumulatingLinearLight_ThenTargetRemainsUnchanged()) {
+        std::fprintf(stderr,
+                     "linear dynamic-light accumulation must ignore a null contribution\n");
+        return 1;
+    }
+    if (!GivenNullTarget_WhenAccumulatingLinearLight_ThenCallIsSafe()) {
+        std::fprintf(stderr,
+                     "linear dynamic-light accumulation must ignore a null target\n");
+        return 1;
+    }
+
+    struct RenderModeCase {
+        int render_mode;
+        int configured;
+        int environment_disabled;
+        int expected;
+    };
+    const RenderModeCase render_mode_cases[] = {
+        /* GFX_RENDER_ORIGINAL: never add port-owned dynamic lights. */
+        {0, 0, 0, 0},
+        {0, 1, 0, 0},
+        {0, 1, 1, 0},
+        /* GFX_RENDER_ENHANCED and GFX_RENDER_REMASTER. */
+        {1, 0, 0, 0},
+        {1, 1, 0, 1},
+        {1, 1, 1, 0},
+        {2, 0, 0, 0},
+        {2, 1, 0, 1},
+        {2, 1, 1, 0},
+    };
+    for (const RenderModeCase &test_case : render_mode_cases) {
+        if (geWorldLightingEnabledForRenderMode(
+                test_case.render_mode,
+                test_case.configured,
+                test_case.environment_disabled) != test_case.expected) {
+            std::fprintf(stderr,
+                         "dynamic lighting render-mode policy failed "
+                         "(mode=%d configured=%d disabled=%d)\n",
+                         test_case.render_mode,
+                         test_case.configured,
+                         test_case.environment_disabled);
+            return 1;
+        }
+    }
+
     if (geWorldLightingEnabled(0) != 0 || geWorldLightingEnabled(1) == 0) {
-        std::fprintf(stderr, "dynamic lighting toggle contract failed\n");
+        std::fprintf(stderr, "dynamic lighting toggle compatibility failed\n");
         return 1;
     }
 
@@ -34,6 +103,49 @@ int main()
         !near(geDynamicLightIntensity(away, near_vertex, light), 0.0f) ||
         !near(geDynamicLightIntensity(facing, outside_vertex, light), 0.0f)) {
         std::fprintf(stderr, "dynamic light direction/falloff contract failed\n");
+        return 1;
+    }
+
+    GeDynamicLight occluded = light;
+    occluded.visibility = 0.0f;
+    if (!near(geDynamicLightVisibility(occluded), 0.0f) ||
+        !near(geDynamicLightIntensity(facing, near_vertex, occluded), 0.0f) ||
+        !near(geDynamicLightSpecular(
+                  facing, near_vertex, occluded,
+                  geAdvancedLightingDefaultMaterial()),
+              0.0f)) {
+        std::fprintf(stderr,
+                     "dynamic light visibility must suppress diffuse and specular\n");
+        return 1;
+    }
+
+    const float visible_specular = geDynamicLightSpecular(
+        facing, near_vertex, light, geAdvancedLightingDefaultMaterial());
+    if (!(visible_specular > 0.0f && visible_specular <= 1.0f)) {
+        std::fprintf(stderr,
+                     "a visible dynamic light must produce a bounded specular response\n");
+        return 1;
+    }
+
+    GeDynamicLight half_visible = light;
+    half_visible.visibility = 0.5f;
+    if (!near(geDynamicLightVisibility(half_visible), 0.5f) ||
+        !near(geDynamicLightIntensity(facing, near_vertex, half_visible),
+              near_intensity * 0.5f)) {
+        std::fprintf(stderr, "dynamic light visibility scaling failed\n");
+        return 1;
+    }
+
+    GeDynamicLight invalid_visibility = light;
+    invalid_visibility.visibility =
+        std::numeric_limits<float>::quiet_NaN();
+    if (geDynamicLightValid(invalid_visibility) ||
+        !near(geDynamicLightVisibility(invalid_visibility), 0.0f) ||
+        !near(geDynamicLightIntensity(facing, near_vertex,
+                                      invalid_visibility), 0.0f) ||
+        !near(geDynamicLightIntensity(nullptr, near_vertex, light), 0.0f)) {
+        std::fprintf(stderr,
+                     "dynamic light visibility invalid-input contract failed\n");
         return 1;
     }
 
@@ -151,6 +263,18 @@ int main()
         !near(contribution[1], near_intensity * 0.25f) ||
         !near(contribution[2], 0.0f)) {
         std::fprintf(stderr, "dynamic light colour contribution failed\n");
+        return 1;
+    }
+
+    float linear_accumulation[3] = {0.4f, 0.8f, 0.1f};
+    const float linear_addition[3] = {
+        0.3f, 0.5f, std::numeric_limits<float>::quiet_NaN()};
+    geDynamicLightAccumulateLinear(linear_accumulation, linear_addition);
+    if (!near(linear_accumulation[0], 0.7f) ||
+        !near(linear_accumulation[1], 1.0f) ||
+        !near(linear_accumulation[2], 0.1f)) {
+        std::fprintf(stderr,
+                     "linear dynamic-light accumulation must clamp without NaN propagation\n");
         return 1;
     }
 

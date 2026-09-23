@@ -91,10 +91,9 @@ static void test_water_pixel_oracles(TestState &tests, std::string_view bdd)
                                     "reflection_asymmetry",
                                     "water_reflection_difference"}),
                  "water pixel validation must distinguish asymmetric reflection from a vertical copy");
-    tests.expect(contains_any(bdd, {"assert_water_occluder_mask",
-                                    "occluder_mask",
-                                    "foreground_depth_difference"}),
-                 "water pixel validation must prove a ship or dam remains in front of the composite");
+    tests.expect(contains_any(bdd, {"assert_water_surface_edge_signal",
+                                    "surface_edge_signal"}),
+                 "live water pixel validation must require visible surface structure without claiming an unmeasured occluder mask");
     tests.expect(contains_any(bdd, {"assert_water_temporal_change",
                                     "temporal_difference",
                                     "water_frame_difference"}),

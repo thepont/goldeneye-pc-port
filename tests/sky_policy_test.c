@@ -49,6 +49,8 @@ static Vtx fake_vertex_storage[128];
 static Mtx fake_matrix_storage[32];
 static s32 fake_vertex_storage_used;
 static s32 fake_matrix_storage_used;
+static int fake_water_world_surface_enabled;
+static int fake_water_material_on_count;
 static struct sImageTableEntry fake_sky_image;
 static struct player fake_current_player;
 
@@ -204,12 +206,15 @@ Gfx *sub_GAME_7F09343C(Gfx *gdl, s32 arg1)
 
 int gfx_water_world_surface_enabled(void)
 {
-    return 0;
+    return fake_water_world_surface_enabled;
 }
 
 Gfx *gfx_emit_water_material(Gfx *gdl, int on)
 {
-    (void)on;
+    if (on)
+    {
+        fake_water_material_on_count++;
+    }
     return gdl;
 }
 
@@ -316,6 +321,8 @@ static void reset_sky_fakes(void)
     fake_current_player.viewy = fake_view_height;
     fake_vertex_storage_used = 0;
     fake_matrix_storage_used = 0;
+    fake_water_world_surface_enabled = 0;
+    fake_water_material_on_count = 0;
     memset(&last_projection_input, 0, sizeof(last_projection_input));
     last_projection_length = 0.0f;
     transform_call_count = 0;
@@ -398,6 +405,60 @@ static void test_sky_corner_intersections_cover_air_water_and_range_cap(void)
                 "zero-height sky corner uses the epsilon plane instead of dividing by zero");
     expect_close(destination.x, 300010.0f, 0.01f,
                  "cloud intersection caps an excessively distant projection");
+}
+
+static void GivenZeroHeightWaterCorner_WhenProjectingToWater_ThenNegativeEpsilonPlaneIsUsed(void)
+{
+    coord3d corner = {40.0f, 0.0f, 0.0f};
+    coord3d destination = {0.0f, 0.0f, 0.0f};
+    f32 fraction = 0.0f;
+    bool intersects;
+
+    /* Arrange */
+    reset_sky_fakes();
+    fake_eye.x = 10.0f;
+    fake_eye.y = 20.0f;
+    fake_eye.z = 30.0f;
+    fake_environment.WaterRepeat = -20.0f;
+
+    /* Act */
+    intersects = skyIsCornerInWater(&corner, &destination, &fraction);
+
+    /* Assert */
+    expect_true(intersects,
+                "a zero-height water corner still intersects the water plane");
+    expect_close(fraction, 1.0f, 0.0001f,
+                 "a zero-height water corner reports the full interpolation fraction");
+    expect_close(destination.x, 160010.0f, 0.01f,
+                 "a zero-height water corner projects along the negative epsilon ray");
+    expect_close(destination.y, -20.0f, 0.0001f,
+                 "a zero-height water corner lands on the configured water repeat");
+}
+
+static void GivenFarWaterIntersection_WhenProjectingToWater_ThenProjectionDistanceIsCapped(void)
+{
+    coord3d corner = {40.0f, 0.0f, 0.0f};
+    coord3d destination = {0.0f, 0.0f, 0.0f};
+    f32 fraction = 0.0f;
+    bool intersects;
+
+    /* Arrange */
+    reset_sky_fakes();
+    fake_eye.x = 10.0f;
+    fake_eye.y = 20.0f;
+    fake_eye.z = 30.0f;
+    fake_environment.WaterRepeat = -10000.0f;
+
+    /* Act */
+    intersects = skyIsCornerInWater(&corner, &destination, &fraction);
+
+    /* Assert */
+    expect_true(intersects,
+                "a far water corner remains a valid water intersection");
+    expect_close(destination.x, 300010.0f, 0.01f,
+                 "a far water intersection is capped to the shared projection range");
+    expect_close(destination.y, -55.0f, 0.0001f,
+                 "the capped water intersection preserves the capped plane distance");
 }
 
 static void test_sky_colour_policy_blends_environment_and_layer(void)
@@ -571,6 +632,80 @@ static void test_sky_render_covers_every_corner_topology(void)
     }
 }
 
+static int render_water_corner_topologies(Gfx *commands)
+{
+    int bounded_render_count = 0;
+    u8 pattern;
+
+    for (pattern = 0; pattern < 16; pattern++)
+    {
+        Gfx *end;
+
+        reset_sky_fakes();
+        fake_environment.Clouds = 1;
+        fake_environment.IsWater = 1;
+        fake_environment.Red = 96;
+        fake_environment.Green = 112;
+        fake_environment.Blue = 128;
+        fake_environment.WaterRed = 32.0f;
+        fake_environment.WaterGreen = 40.0f;
+        fake_environment.WaterBlue = 48.0f;
+        fake_environment.CloudRepeat = 200.0f;
+        fake_environment.WaterRepeat = -200.0f;
+        fake_screen_width = 320.0f;
+        fake_screen_height = 240.0f;
+        fake_corner_pattern_enabled = TRUE;
+        fake_corner_pattern = pattern;
+        g_SkyCloudOffset = 0.0f;
+
+        end = skyRender(commands);
+        if (end > commands && end <= commands + 1024)
+        {
+            bounded_render_count++;
+        }
+    }
+
+    return bounded_render_count;
+}
+
+static void GivenWaterSkyCornerTopologies_WhenRendered_ThenEveryTopologyStaysBounded(void)
+{
+    Gfx commands[1024];
+
+    /* Arrange */
+
+    /* Act */
+    const int bounded_render_count = render_water_corner_topologies(commands);
+
+    /* Assert */
+    expect_true(bounded_render_count == 16,
+                "water sky rendering handles every corner topology within its display-list bound");
+}
+
+static void GivenEnhancedWaterSurface_WhenRenderingWaterSky_ThenLegacyWaterMaterialIsSkipped(void)
+{
+    Gfx commands[1024];
+    Gfx *end;
+
+    /* Arrange */
+    reset_sky_fakes();
+    fake_environment.Clouds = 1;
+    fake_environment.IsWater = 1;
+    fake_environment.WaterRepeat = -200.0f;
+    fake_corner_pattern_enabled = TRUE;
+    fake_corner_pattern = 0;
+    fake_water_world_surface_enabled = 1;
+
+    /* Act */
+    end = skyRender(commands);
+
+    /* Assert */
+    expect_true(end > commands && end <= commands + 1024,
+                "enhanced water sky rendering emits a bounded pass");
+    expect_true(fake_water_material_on_count == 0,
+                "enhanced water rendering does not enter the legacy water-material path");
+}
+
 static void test_sky_render_legacy_water_path_emits_textured_fan(void)
 {
     Gfx commands[1024];
@@ -654,6 +789,45 @@ static void test_sky_render_primitives_emit_port_geometry(void)
                 "sky quad renderer emits bounded port geometry for a valid quad");
     expect_true(fake_vertex_storage_used >= 7 && fake_matrix_storage_used >= 4,
                 "sky primitive renderers allocate geometry and projection state");
+}
+
+static void GivenUntexturedSkyTriangle_WhenRendered_ThenPortGeometryIsEmitted(void)
+{
+    Gfx commands[256];
+    SkyRelated38 a = make_sky_render_vertex(0.0f, 0.0f, 0.0f, 0.0f);
+    SkyRelated38 b = make_sky_render_vertex(400.0f, 0.0f, 2048.0f, 0.0f);
+    SkyRelated38 c = make_sky_render_vertex(0.0f, 400.0f, 0.0f, 2048.0f);
+    Gfx *end;
+
+    /* Arrange */
+    reset_sky_fakes();
+
+    /* Act */
+    end = skyRenderTri(commands, &a, &b, &c, 65536.0f, FALSE);
+
+    /* Assert */
+    expect_true(end > commands && end <= commands + 256,
+                "untextured sky triangles emit bounded port geometry");
+}
+
+static void GivenDegenerateSkyQuad_WhenRendered_ThenNoGeometryIsEmitted(void)
+{
+    Gfx commands[64];
+    SkyRelated38 a = make_sky_render_vertex(0.0f, 0.0f, 0.0f, 0.0f);
+    SkyRelated38 b = make_sky_render_vertex(100.0f, 100.0f, 100.0f, 0.0f);
+    SkyRelated38 c = make_sky_render_vertex(200.0f, 200.0f, 0.0f, 100.0f);
+    SkyRelated38 d = make_sky_render_vertex(300.0f, 100.0f, 100.0f, 100.0f);
+    Gfx *end;
+
+    /* Arrange */
+    reset_sky_fakes();
+
+    /* Act */
+    end = skyRenderFull(commands, &a, &a, &c, &d, 65536.0f);
+
+    /* Assert */
+    expect_true(end == commands,
+                "degenerate sky quads emit no geometry");
 }
 
 static void test_sky_clamp_and_round_boundaries(void)
@@ -744,14 +918,20 @@ int main(void)
 {
     test_sky_world_position_uses_viewport_and_water_concavity();
     test_sky_corner_intersections_cover_air_water_and_range_cap();
+    GivenZeroHeightWaterCorner_WhenProjectingToWater_ThenNegativeEpsilonPlaneIsUsed();
+    GivenFarWaterIntersection_WhenProjectingToWater_ThenProjectionDistanceIsCapped();
     test_sky_colour_policy_blends_environment_and_layer();
     test_sky_projection_handles_identity_zero_and_negative_w();
     test_sky_stage_and_tick_state_are_deterministic();
     test_sky_render_clears_each_viewport_shape();
     test_sky_render_covers_every_corner_topology();
+    GivenWaterSkyCornerTopologies_WhenRendered_ThenEveryTopologyStaysBounded();
+    GivenEnhancedWaterSurface_WhenRenderingWaterSky_ThenLegacyWaterMaterialIsSkipped();
     test_sky_render_legacy_water_path_emits_textured_fan();
     test_sky_render_primitives_reject_degenerate_geometry();
     test_sky_render_primitives_emit_port_geometry();
+    GivenUntexturedSkyTriangle_WhenRendered_ThenPortGeometryIsEmitted();
+    GivenDegenerateSkyQuad_WhenRendered_ThenNoGeometryIsEmitted();
     test_sky_clamp_and_round_boundaries();
     test_sky_fixed_point_conversion_is_saturated_and_signed();
     test_sky_edge_intersection_preserves_geometry();

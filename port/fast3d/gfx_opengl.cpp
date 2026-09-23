@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <cstring>
 #include <cmath>
+#include <limits>
 
 #include <map>
 #include <unordered_map>
@@ -20,6 +21,7 @@
 #include "glad/glad.h"
 
 #include "bump_mapping_policy.h"
+#include "shadow_mapping_policy.h"
 #include "gfx_cc.h"
 #include "gfx_water_composite_policy.h"
 #include "gfx_water_heightfield_policy.h"
@@ -41,6 +43,20 @@ struct ShaderProgram {
     GLint three_point_filter_locations[2];
     GLint bump_map_location;
     GLint bump_map_enabled_location;
+    GLint advanced_lighting_enabled_location;
+    GLint advanced_light_direction_location;
+    GLint advanced_light_color_location;
+    GLint advanced_specular_color_location;
+    GLint advanced_ambient_location;
+    GLint advanced_shininess_location;
+    GLint linear_dynamic_lighting_enabled_location;
+    GLint shadow_map_location;
+    GLint shadow_mapping_enabled_location;
+    GLint shadow_light_space_location;
+    GLint shadow_map_texel_size_location;
+    bool advanced_lighting_eligible;
+    bool linear_lighting_eligible;
+    bool shadow_mapping_eligible;
 };
 
 struct Framebuffer {
@@ -107,6 +123,9 @@ static GLint water_composite_contact_start_location = -1;
 static GLint water_composite_contact_band_location = -1;
 static GLint water_composite_feature_toggles_location = -1;
 static GLint water_composite_reflection_valid_location = -1;
+static GLint water_composite_light_direction_location = -1;
+static GLint water_composite_light_color_location = -1;
+static GLint water_composite_shininess_location = -1;
 static GLuint water_composite_vbo;
 static GLuint water_scene_fbo;
 static GLuint water_scene_color;
@@ -135,6 +154,19 @@ static GLuint postfx_depth_texture;
 static uint32_t postfx_depth_width;
 static uint32_t postfx_depth_height;
 static bool postfx_depth_valid;
+static GLuint shadow_map_fbo;
+static GLuint shadow_map_texture;
+static GLuint shadow_map_vbo;
+static GLuint shadow_map_vao;
+static GLuint shadow_map_program;
+static GLint shadow_map_position_location = -1;
+static GLint shadow_map_matrix_location = -1;
+static bool shadow_map_ready;
+static bool shadow_resources_failed;
+static GeShadowMatrix shadow_light_space = {};
+static constexpr uint32_t kShadowMapResolution = 1024;
+static uint32_t shadow_map_resolution = kShadowMapResolution;
+static uint32_t shadow_map_allocated_resolution;
 static float current_noise_scale;
 static int current_anisotropy_level = 4;   /* B1: sane default (0 was invalid for GL_TEXTURE_MAX_ANISOTROPY) */
 static FilteringMode current_filter_mode = FILTER_LINEAR;
@@ -148,6 +180,25 @@ static char gl_glsl_version_str[16] = "130";
 static GLenum gl_mirror_clamp = GL_MIRROR_CLAMP_TO_EDGE;
 static bool gl_es = false;
 static bool gl_core_profile = false;
+static bool framebuffer_srgb_control_available = false;
+
+static bool gfx_opengl_is_framebuffer_srgb_enabled(void)
+{
+    return framebuffer_srgb_control_available &&
+           glIsEnabled(GL_FRAMEBUFFER_SRGB) == GL_TRUE;
+}
+
+static void gfx_opengl_set_framebuffer_srgb(bool enabled)
+{
+    if (!framebuffer_srgb_control_available) {
+        return;
+    }
+    if (enabled) {
+        glEnable(GL_FRAMEBUFFER_SRGB);
+    } else {
+        glDisable(GL_FRAMEBUFFER_SRGB);
+    }
+}
 
 static void gfx_opengl_release_water_resources(void);
 
@@ -199,6 +250,71 @@ static void gfx_opengl_set_uniforms(struct ShaderProgram* prg) {
     if (prg->bump_map_enabled_location >= 0) {
         glUniform1i(prg->bump_map_enabled_location,
                     current_bump_map_enabled ? 1 : 0);
+    }
+    if (prg->advanced_lighting_enabled_location >= 0) {
+        const bool advanced_lighting =
+            current_bump_map_enabled &&
+            gfx_get_render_mode() >= GFX_RENDER_ENHANCED &&
+            prg->advanced_lighting_eligible;
+        glUniform1i(prg->advanced_lighting_enabled_location,
+                    advanced_lighting ? 1 : 0);
+    }
+    if (prg->advanced_light_direction_location >= 0) {
+        /* A stable view-space key light keeps the optional material pass
+         * deterministic while the legacy RSP lights remain authoritative for
+         * Original mode. The normal-map path is the single consumer of this
+         * material light; future streamed world lights can replace these
+         * values without changing the shader contract. */
+        glUniform3f(prg->advanced_light_direction_location,
+                    geShadowDefaultLightDirection[0],
+                    geShadowDefaultLightDirection[1],
+                    geShadowDefaultLightDirection[2]);
+    }
+    if (prg->advanced_light_color_location >= 0) {
+        glUniform3f(prg->advanced_light_color_location,
+                    0.92f, 0.96f, 1.0f);
+    }
+    if (prg->advanced_specular_color_location >= 0) {
+        glUniform3f(prg->advanced_specular_color_location,
+                    1.0f, 1.0f, 1.0f);
+    }
+    if (prg->advanced_ambient_location >= 0) {
+        glUniform3f(prg->advanced_ambient_location,
+                    0.34f, 0.38f, 0.44f);
+    }
+    if (prg->advanced_shininess_location >= 0) {
+        glUniform1f(prg->advanced_shininess_location, 32.0f);
+    }
+    if (prg->linear_dynamic_lighting_enabled_location >= 0) {
+        const bool linear_dynamic_lighting =
+            gfx_get_render_mode() >= GFX_RENDER_ENHANCED &&
+            prg->linear_lighting_eligible;
+        glUniform1i(prg->linear_dynamic_lighting_enabled_location,
+                    linear_dynamic_lighting ? 1 : 0);
+    }
+    if (prg->shadow_mapping_enabled_location >= 0) {
+        const bool enabled = shadow_map_ready &&
+                             gfx_get_render_mode() >= GFX_RENDER_ENHANCED &&
+                             prg->shadow_mapping_eligible;
+        glUniform1i(prg->shadow_mapping_enabled_location, enabled ? 1 : 0);
+        if (prg->shadow_map_location >= 0) {
+            glUniform1i(prg->shadow_map_location, 3);
+        }
+        if (prg->shadow_light_space_location >= 0) {
+            glUniformMatrix4fv(prg->shadow_light_space_location, 1, GL_FALSE,
+                               shadow_light_space.column_major);
+        }
+        if (prg->shadow_map_texel_size_location >= 0) {
+            const float inverse_resolution =
+                1.0f / static_cast<float>(shadow_map_resolution);
+            glUniform2f(prg->shadow_map_texel_size_location,
+                        inverse_resolution, inverse_resolution);
+        }
+        GLint active_texture = GL_TEXTURE0;
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, shadow_map_texture);
+        glActiveTexture(static_cast<GLenum>(active_texture));
     }
 }
 
@@ -335,9 +451,17 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
     static unsigned int water_shader_trace_events = 0;
     struct CCFeatures cc_features = { 0 };
     gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
+    const bool shadow_mapping =
+        (shader_id1 & SHADER_OPT_SHADOW_MAPPING) != 0;
+    const GeFast3dMaterialRequirements material_requirements =
+        geFast3dMaterialRequirements(cc_features.used_textures[0],
+                                     gfx_get_bump_maps_enabled(),
+                                     shadow_mapping ? 1 : 0);
     const bool uses_view_position =
-        geFast3dMaterialUsesViewPosition(
-            cc_features.used_textures[0], gfx_get_bump_maps_enabled()) != 0;
+        material_requirements.uses_view_position != 0;
+    const bool linear_lighting_eligible =
+        !cc_features.opt_alpha && !cc_features.opt_fog &&
+        !cc_features.opt_grayscale;
     const bool water_material = (shader_id1 & SHADER_OPT_WATER) != 0;
     const bool water_remaster = (shader_id1 & SHADER_OPT_WATER_REMASTER) != 0;
 
@@ -379,6 +503,9 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
     }
 
     append_line(vs_buf, &vs_len, "INPUT vec4 aVtxPos;");
+    append_line(vs_buf, &vs_len, "INPUT vec3 aLinearDynamicLight;");
+    append_line(vs_buf, &vs_len, "OUTPUT vec3 vLinearDynamicLight;");
+    num_floats += 3;
     if (uses_view_position) {
         append_line(vs_buf, &vs_len, "INPUT vec3 aVtxViewPos;");
         append_line(vs_buf, &vs_len, "OUTPUT vec3 vVtxViewPos;");
@@ -418,6 +545,7 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
     }
 
     append_line(vs_buf, &vs_len, "void main() {");
+    append_line(vs_buf, &vs_len, "    vLinearDynamicLight = aLinearDynamicLight;");
     if (uses_view_position) {
         append_line(vs_buf, &vs_len, "    vVtxViewPos = aVtxViewPos;");
     }
@@ -487,6 +615,7 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
     if (uses_view_position) {
         append_line(fs_buf, &fs_len, "INPUT vec3 vVtxViewPos;");
     }
+    append_line(fs_buf, &fs_len, "INPUT vec3 vLinearDynamicLight;");
     if (cc_features.opt_fog) {
         append_line(fs_buf, &fs_len, "INPUT vec4 vFog;");
     }
@@ -512,9 +641,71 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
      * combiner texture units. Do not even add its auxiliary stream to the
      * compatibility shader when the feature is disabled: Original mode must
      * retain the committed position/texture vertex contract. */
-    if (uses_view_position) {
+    if (material_requirements.uses_bump_mapping) {
         append_line(fs_buf, &fs_len, "uniform sampler2D uBumpMap;");
+    }
+    if (uses_view_position) {
         append_line(fs_buf, &fs_len, "uniform int uBumpMapEnabled;");
+        append_line(fs_buf, &fs_len, "uniform int uAdvancedLightingEnabled;");
+        append_line(fs_buf, &fs_len, "uniform vec3 uAdvancedLightDirection;");
+        append_line(fs_buf, &fs_len, "uniform vec3 uAdvancedLightColor;");
+        append_line(fs_buf, &fs_len, "uniform vec3 uAdvancedSpecularColor;");
+        append_line(fs_buf, &fs_len, "uniform vec3 uAdvancedAmbient;");
+        append_line(fs_buf, &fs_len, "uniform float uAdvancedShininess;");
+    }
+    if (shadow_mapping) {
+        append_line(fs_buf, &fs_len, "uniform sampler2D uShadowMap;");
+        append_line(fs_buf, &fs_len, "uniform int uShadowMappingEnabled;");
+        append_line(fs_buf, &fs_len, "uniform mat4 uShadowLightSpace;");
+        append_line(fs_buf, &fs_len, "uniform vec2 uShadowMapTexelSize;");
+    }
+    append_line(fs_buf, &fs_len, "uniform int uLinearDynamicLightingEnabled;");
+    if (uses_view_position || linear_lighting_eligible) {
+        append_line(fs_buf, &fs_len, "vec3 advancedDisplayToLinear(vec3 value) {");
+        append_line(fs_buf, &fs_len, "    value = clamp(value, vec3(0.0), vec3(1.0));");
+        append_line(fs_buf, &fs_len, "    return vec3(value.r <= 0.04045 ? value.r / 12.92 : pow((value.r + 0.055) / 1.055, 2.4),");
+        append_line(fs_buf, &fs_len, "        value.g <= 0.04045 ? value.g / 12.92 : pow((value.g + 0.055) / 1.055, 2.4),");
+        append_line(fs_buf, &fs_len, "        value.b <= 0.04045 ? value.b / 12.92 : pow((value.b + 0.055) / 1.055, 2.4));");
+        append_line(fs_buf, &fs_len, "}");
+        append_line(fs_buf, &fs_len, "vec3 advancedLinearToDisplay(vec3 value) {");
+        append_line(fs_buf, &fs_len, "    value = clamp(value, vec3(0.0), vec3(1.0));");
+        append_line(fs_buf, &fs_len, "    return vec3(value.r <= 0.0031308 ? value.r * 12.92 : 1.055 * pow(value.r, 1.0 / 2.4) - 0.055,");
+        append_line(fs_buf, &fs_len, "        value.g <= 0.0031308 ? value.g * 12.92 : 1.055 * pow(value.g, 1.0 / 2.4) - 0.055,");
+        append_line(fs_buf, &fs_len, "        value.b <= 0.0031308 ? value.b * 12.92 : 1.055 * pow(value.b, 1.0 / 2.4) - 0.055);");
+        append_line(fs_buf, &fs_len, "}");
+        append_line(fs_buf, &fs_len, "vec3 advancedSafeNormalize(vec3 value) {");
+        append_line(fs_buf, &fs_len, "    float lengthSquared = dot(value, value);");
+        append_line(fs_buf, &fs_len, "    return lengthSquared > 0.000001 && lengthSquared < 1000000000000.0 ? value / sqrt(lengthSquared) : vec3(0.0, 0.0, 1.0);");
+        append_line(fs_buf, &fs_len, "}");
+    }
+
+    if (shadow_mapping) {
+        append_line(fs_buf, &fs_len, "float shadowPcf(vec3 surfaceNormal) {");
+        append_line(fs_buf, &fs_len, "    vec4 lightClip = uShadowLightSpace * vec4(vVtxViewPos, 1.0);");
+        append_line(fs_buf, &fs_len, "    if (lightClip.w <= 0.000001) return 0.0;");
+        append_line(fs_buf, &fs_len, "    vec3 projected = lightClip.xyz / lightClip.w * 0.5 + 0.5;");
+        append_line(fs_buf, &fs_len, "    if (projected.x < 0.0 || projected.x > 1.0 || projected.y < 0.0 || projected.y > 1.0 || projected.z < 0.0 || projected.z > 1.0) return 0.0;");
+        append_line(fs_buf, &fs_len, "    vec3 normal = advancedSafeNormalize(surfaceNormal);");
+        append_line(fs_buf, &fs_len, "    vec3 lightDirection = advancedSafeNormalize(uAdvancedLightDirection);");
+        append_line(fs_buf, &fs_len, "    float normalLight = clamp(dot(normal, lightDirection), 0.0, 1.0);");
+        char shadow_bias_line[192] = {};
+        snprintf(shadow_bias_line, sizeof(shadow_bias_line),
+                 "    float shadowBias = clamp(max(%.8g, %.8g * (1.0 - normalLight)), %.8g, %.8g);",
+                 geShadowMinimumBias, geShadowSlopeBiasScale,
+                 geShadowMinimumBias, geShadowMaximumBias);
+        append_line(fs_buf, &fs_len, shadow_bias_line);
+        append_line(fs_buf, &fs_len, "    float shadow = 0.0;");
+        append_line(fs_buf, &fs_len, "    for (int x = -1; x <= 1; ++x) {");
+        append_line(fs_buf, &fs_len, "        for (int y = -1; y <= 1; ++y) {");
+        append_line(fs_buf, &fs_len, "            vec2 sampleUv = projected.xy + vec2(float(x), float(y)) * uShadowMapTexelSize;");
+        append_line(fs_buf, &fs_len, "            if (sampleUv.x >= 0.0 && sampleUv.x <= 1.0 && sampleUv.y >= 0.0 && sampleUv.y <= 1.0) {");
+        append_line(fs_buf, &fs_len, "                float closestDepth = SAMPLE_TEX(uShadowMap, sampleUv).r;");
+        append_line(fs_buf, &fs_len, "                shadow += projected.z - shadowBias > closestDepth ? 1.0 : 0.0;");
+        append_line(fs_buf, &fs_len, "            }");
+        append_line(fs_buf, &fs_len, "        }");
+        append_line(fs_buf, &fs_len, "    }");
+        append_line(fs_buf, &fs_len, "    return shadow / 9.0;");
+        append_line(fs_buf, &fs_len, "}");
     }
 
     append_line(fs_buf, &fs_len, "uniform int frame_count;");
@@ -639,7 +830,7 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
     append_line(fs_buf, &fs_len, "    texel = WRAP(texel, -0.51, 1.51);");
     append_line(fs_buf, &fs_len, "    texel = clamp(texel, 0.0, 1.0);");
 
-    if (uses_view_position) {
+    if (material_requirements.uses_bump_mapping) {
         append_line(fs_buf, &fs_len, "    if (uBumpMapEnabled != 0) {");
         append_line(fs_buf, &fs_len,
                     "        vec3 bumpSample = SAMPLE_TEX(uBumpMap, vTexCoordAdj0).xyz * 2.0 - 1.0;");
@@ -658,18 +849,58 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
         append_line(fs_buf, &fs_len,
                     "        float bumpSafeDet = abs(bumpDet) < 0.0001 ? 0.0001 : bumpDet;");
         append_line(fs_buf, &fs_len,
-                    "        vec3 bumpTangent = normalize((bumpDpDx * bumpDuDy.y - bumpDpDy * bumpDuDx.y) / bumpSafeDet);");
+                    "        vec3 bumpTangent = advancedSafeNormalize((bumpDpDx * bumpDuDy.y - bumpDpDy * bumpDuDx.y) / bumpSafeDet);");
         append_line(fs_buf, &fs_len,
-                    "        vec3 bumpBitangent = normalize((-bumpDpDx * bumpDuDy.x + bumpDpDy * bumpDuDx.x) / bumpSafeDet);");
+                    "        vec3 bumpBitangent = advancedSafeNormalize((-bumpDpDx * bumpDuDy.x + bumpDpDy * bumpDuDx.x) / bumpSafeDet);");
         append_line(fs_buf, &fs_len,
-                    "        vec3 bumpSurfaceNormal = normalize(cross(bumpTangent, bumpBitangent));");
+                    "        vec3 bumpSurfaceNormal = advancedSafeNormalize(cross(bumpTangent, bumpBitangent));");
         append_line(fs_buf, &fs_len,
-                    "        vec3 bumpNormal = normalize(bumpTangent * bumpSample.x + bumpBitangent * bumpSample.y + bumpSurfaceNormal * bumpSample.z);");
+                    "        vec3 bumpNormal = advancedSafeNormalize(bumpTangent * bumpSample.x + bumpBitangent * bumpSample.y + bumpSurfaceNormal * bumpSample.z);");
         append_line(fs_buf, &fs_len,
                     "        bumpNormal = mix(vec3(0.0, 0.0, 1.0), bumpNormal, bumpValid);");
-        append_line(fs_buf, &fs_len,
-                    "        float bumpLighting = clamp(0.82 + bumpNormal.z * 0.30, 0.65, 1.15);");
-        append_line(fs_buf, &fs_len, "        texel.rgb *= bumpLighting;");
+        append_line(fs_buf, &fs_len, "        if (uAdvancedLightingEnabled != 0) {");
+        append_line(fs_buf, &fs_len, "            vec3 advancedLightDirection = advancedSafeNormalize(uAdvancedLightDirection);");
+        append_line(fs_buf, &fs_len, "            vec3 advancedViewDirection = advancedSafeNormalize(-vVtxViewPos);");
+        append_line(fs_buf, &fs_len, "            vec3 halfway = advancedSafeNormalize(advancedLightDirection + advancedViewDirection);");
+        append_line(fs_buf, &fs_len, "            float diffuse = max(dot(bumpNormal, advancedLightDirection), 0.0);");
+        append_line(fs_buf, &fs_len, "            float specular = diffuse > 0.0 ? pow(max(dot(bumpNormal, halfway), 0.0), clamp(uAdvancedShininess, 1.0, 128.0)) : 0.0;");
+        append_line(fs_buf, &fs_len, "            vec3 linearTexel = advancedDisplayToLinear(texel.rgb);");
+        if (shadow_mapping) {
+            append_line(fs_buf, &fs_len, "            float shadow = uShadowMappingEnabled != 0 ? shadowPcf(bumpNormal) : 0.0;");
+            append_line(fs_buf, &fs_len, "            vec3 linearColour = linearTexel * (uAdvancedAmbient + uAdvancedLightColor * diffuse * (1.0 - shadow)) + uAdvancedSpecularColor * specular * 0.32 * (1.0 - shadow);");
+        } else {
+            append_line(fs_buf, &fs_len, "            vec3 linearColour = linearTexel * (uAdvancedAmbient + uAdvancedLightColor * diffuse) + uAdvancedSpecularColor * specular * 0.32;");
+        }
+        append_line(fs_buf, &fs_len, "            if (uLinearDynamicLightingEnabled != 0) linearColour += vLinearDynamicLight;");
+        append_line(fs_buf, &fs_len, "            texel.rgb = advancedLinearToDisplay(clamp(linearColour, vec3(0.0), vec3(1.0)));");
+        append_line(fs_buf, &fs_len, "        } else {");
+        append_line(fs_buf, &fs_len, "            float bumpLighting = clamp(0.82 + bumpNormal.z * 0.30, 0.65, 1.15);");
+        append_line(fs_buf, &fs_len, "            texel.rgb *= bumpLighting;");
+        append_line(fs_buf, &fs_len, "        }");
+        append_line(fs_buf, &fs_len, "    }");
+    }
+
+    if (shadow_mapping && linear_lighting_eligible) {
+        append_line(fs_buf, &fs_len, "    if (uShadowMappingEnabled != 0 && (uBumpMapEnabled == 0 || uAdvancedLightingEnabled == 0)) {");
+        append_line(fs_buf, &fs_len, "        vec3 geometricNormal = advancedSafeNormalize(cross(dFdx(vVtxViewPos), dFdy(vVtxViewPos)));");
+        append_line(fs_buf, &fs_len, "        if (!gl_FrontFacing) geometricNormal = -geometricNormal;");
+        append_line(fs_buf, &fs_len, "        float shadow = shadowPcf(geometricNormal);");
+        append_line(fs_buf, &fs_len, "        float direct = max(dot(geometricNormal, advancedSafeNormalize(uAdvancedLightDirection)), 0.0);");
+        append_line(fs_buf, &fs_len, "        vec3 linearTexel = advancedDisplayToLinear(texel.rgb);");
+        append_line(fs_buf, &fs_len, "        texel.rgb = advancedLinearToDisplay(clamp(linearTexel * (0.78 + 0.30 * direct * (1.0 - shadow)), vec3(0.0), vec3(1.0))); ");
+        append_line(fs_buf, &fs_len, "    }");
+    }
+
+    if (linear_lighting_eligible) {
+        append_line(fs_buf, &fs_len, "    if (uLinearDynamicLightingEnabled != 0");
+        if (uses_view_position) {
+            append_line(fs_buf, &fs_len,
+                        "        && (uBumpMapEnabled == 0 || uAdvancedLightingEnabled == 0)");
+        }
+        append_line(fs_buf, &fs_len, "    ) {");
+        append_line(fs_buf, &fs_len, "        vec3 linearTexel = advancedDisplayToLinear(texel.rgb);");
+        append_line(fs_buf, &fs_len, "        vec3 linearColour = linearTexel + vLinearDynamicLight;");
+        append_line(fs_buf, &fs_len, "        texel.rgb = advancedLinearToDisplay(clamp(linearColour, vec3(0.0), vec3(1.0)));");
         append_line(fs_buf, &fs_len, "    }");
     }
 
@@ -788,6 +1019,11 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
     prg->attrib_sizes[cnt] = 4;
     ++cnt;
 
+    prg->attrib_locations[cnt] = glGetAttribLocation(shader_program,
+                                                      "aLinearDynamicLight");
+    prg->attrib_sizes[cnt] = 3;
+    ++cnt;
+
     if (uses_view_position) {
         prg->attrib_locations[cnt] = glGetAttribLocation(shader_program, "aVtxViewPos");
         prg->attrib_sizes[cnt] = 3;
@@ -839,6 +1075,17 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
     prg->used_textures[1] = cc_features.used_textures[1];
     prg->num_floats = num_floats;
     prg->num_attribs = cnt;
+    /* Keep the explicit linear/display transfer at the edge of the opaque
+     * material path. Fog, grayscale, and alpha blending have their own
+     * display-space semantics in the legacy combiner and must not be mixed
+     * with this first advanced-lighting slice. */
+    prg->advanced_lighting_eligible = uses_view_position &&
+                                      !cc_features.opt_alpha &&
+                                      !cc_features.opt_fog &&
+                                      !cc_features.opt_grayscale;
+    prg->linear_lighting_eligible = linear_lighting_eligible;
+    prg->shadow_mapping_eligible = shadow_mapping &&
+                                   linear_lighting_eligible;
 
     glUseProgram(shader_program);
 
@@ -854,6 +1101,32 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
     prg->bump_map_location = glGetUniformLocation(shader_program, "uBumpMap");
     prg->bump_map_enabled_location =
         glGetUniformLocation(shader_program, "uBumpMapEnabled");
+    prg->advanced_lighting_enabled_location =
+        glGetUniformLocation(shader_program, "uAdvancedLightingEnabled");
+    prg->advanced_light_direction_location =
+        glGetUniformLocation(shader_program, "uAdvancedLightDirection");
+    prg->advanced_light_color_location =
+        glGetUniformLocation(shader_program, "uAdvancedLightColor");
+    prg->advanced_specular_color_location =
+        glGetUniformLocation(shader_program, "uAdvancedSpecularColor");
+    prg->advanced_ambient_location =
+        glGetUniformLocation(shader_program, "uAdvancedAmbient");
+    prg->advanced_shininess_location =
+        glGetUniformLocation(shader_program, "uAdvancedShininess");
+    prg->linear_dynamic_lighting_enabled_location =
+        glGetUniformLocation(shader_program,
+                             "uLinearDynamicLightingEnabled");
+    prg->shadow_map_location =
+        glGetUniformLocation(shader_program, "uShadowMap");
+    prg->shadow_mapping_enabled_location =
+        glGetUniformLocation(shader_program, "uShadowMappingEnabled");
+    prg->shadow_light_space_location =
+        glGetUniformLocation(shader_program, "uShadowLightSpace");
+    prg->shadow_map_texel_size_location =
+        glGetUniformLocation(shader_program, "uShadowMapTexelSize");
+    if (prg->shadow_map_location >= 0) {
+        glUniform1i(prg->shadow_map_location, 3);
+    }
     if (prg->bump_map_location >= 0) {
         glUniform1i(prg->bump_map_location, 2);
     }
@@ -1298,6 +1571,17 @@ static void gfx_opengl_init(void) {
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &val);
     gl_core_profile = (val == SDL_GL_CONTEXT_PROFILE_CORE);
     gl_es = (val == SDL_GL_CONTEXT_PROFILE_ES);
+    const bool desktop_framebuffer_srgb_extension =
+        SDL_GL_ExtensionSupported("GL_ARB_framebuffer_sRGB") == SDL_TRUE ||
+        SDL_GL_ExtensionSupported("GL_EXT_framebuffer_sRGB") == SDL_TRUE;
+    const bool gles_srgb_write_control_extension =
+        SDL_GL_ExtensionSupported("GL_EXT_sRGB_write_control") == SDL_TRUE;
+    framebuffer_srgb_control_available =
+        geWaterFramebufferSrgbControlAvailable(
+            gl_es ? 1 : 0,
+            !gl_es && GLVersion.major >= 3 ? 1 : 0,
+            !gl_es && desktop_framebuffer_srgb_extension ? 1 : 0,
+            gl_es && gles_srgb_write_control_extension ? 1 : 0) != 0;
 
     gfx_opengl_init_extensions();
 
@@ -1873,6 +2157,9 @@ static void gfx_opengl_release_water_resources(void)
     water_composite_contact_band_location = -1;
     water_composite_feature_toggles_location = -1;
     water_composite_reflection_valid_location = -1;
+    water_composite_light_direction_location = -1;
+    water_composite_light_color_location = -1;
+    water_composite_shininess_location = -1;
 }
 
 static bool gfx_opengl_compile_water_composite_program(void)
@@ -2090,6 +2377,9 @@ static bool gfx_opengl_compile_water_composite_program(void)
                   "uniform float uWaterContactBand;\n"
                   "uniform vec4 uWaterFeatureToggles;\n"
                   "uniform float uWaterReflectionValid;\n"
+                  "uniform vec3 uWaterLightDirection;\n"
+                  "uniform vec3 uWaterLightColor;\n"
+                  "uniform float uWaterShininess;\n"
                   "INPUT vec2 vWaterUv;\n"
                   "INPUT vec3 vViewPosition;\n"
                   "INPUT vec3 vDisplacedViewPosition;\n"
@@ -2401,6 +2691,16 @@ static bool gfx_opengl_compile_water_composite_program(void)
                   "        viewPosition = reconstructViewPosition(screenUv, gl_FragCoord.z);\n"
                   "    }\n"
                   "    vec3 viewRay = safeNormalize(viewPosition);\n"
+                  "    vec3 waterLightDirection = safeNormalize(uWaterLightDirection);\n"
+                  "    vec3 waterViewDirection = safeNormalize(-viewPosition);\n"
+                  "    vec3 waterHalfway = safeNormalize(waterLightDirection + waterViewDirection);\n"
+                  "    float directDiffuse = max(dot(waterNormalView, waterLightDirection), 0.0);\n"
+                  "    float directSpecular = directDiffuse > 0.0\n"
+                  "        ? pow(max(dot(waterNormalView, waterHalfway), 0.0),\n"
+                  "            clamp(uWaterShininess, 1.0, 128.0))\n"
+                  "        : 0.0;\n"
+                  "    vec3 directHighlight = uWaterLightColor * directSpecular *\n"
+                  "        (0.20 + 0.10 * tierScale);\n"
                   "    float reflectValid = 0.0;\n"
                   "    float refractValid = 0.0;\n"
                   "    vec3 reflectedRay = safeReflect(viewRay, waterNormalView, reflectValid);\n"
@@ -2491,6 +2791,7 @@ static bool gfx_opengl_compile_water_composite_program(void)
                   "    water += specular * reflectionWeight;\n"
                   "    water = max(water, waterVisibilityFloor(waterThickness));\n"
                   "    water *= 0.98 + 0.02 * fract(vSurfaceId * 0.6180339);\n"
+                  "    water += directHighlight;\n"
                   "    float contactDistance = max(nearestNeighbourDepth - surfaceDepth, 0.0);\n"
                   "    float proximity = 1.0 - smoothstep(uWaterContactStart, uWaterContactBand, contactDistance);\n"
                   "    float edge = smoothstep(%g, %g, neighbourDepth);\n"
@@ -2653,6 +2954,12 @@ static bool gfx_opengl_compile_water_composite_program(void)
         program, "uWaterFeatureToggles");
     water_composite_reflection_valid_location = glGetUniformLocation(
         program, "uWaterReflectionValid");
+    water_composite_light_direction_location = glGetUniformLocation(
+        program, "uWaterLightDirection");
+    water_composite_light_color_location = glGetUniformLocation(
+        program, "uWaterLightColor");
+    water_composite_shininess_location = glGetUniformLocation(
+        program, "uWaterShininess");
     const bool uniforms_ready = water_composite_scene_location >= 0 && water_composite_depth_location >= 0 &&
            water_composite_scene_depth_valid_location >= 0 &&
            water_composite_time_location >= 0 &&
@@ -2682,7 +2989,10 @@ static bool gfx_opengl_compile_water_composite_program(void)
            water_composite_contact_start_location >= 0 &&
            water_composite_contact_band_location >= 0 &&
            water_composite_feature_toggles_location >= 0 &&
-           water_composite_reflection_valid_location >= 0;
+           water_composite_reflection_valid_location >= 0 &&
+           water_composite_light_direction_location >= 0 &&
+           water_composite_light_color_location >= 0 &&
+           water_composite_shininess_location >= 0;
     if (!uniforms_ready) {
         if (getenv("GE_WATER_TRACE") != nullptr) {
             sysLogPrintf(LOG_WARNING,
@@ -2735,6 +3045,9 @@ static bool gfx_opengl_compile_water_composite_program(void)
         water_composite_contact_band_location = -1;
         water_composite_feature_toggles_location = -1;
         water_composite_reflection_valid_location = -1;
+        water_composite_light_direction_location = -1;
+        water_composite_light_color_location = -1;
+        water_composite_shininess_location = -1;
     }
     return uniforms_ready;
 }
@@ -3096,6 +3409,7 @@ struct WaterCompositeGLState {
     GLint stencil_write_mask;
     GLfloat polygon_offset_factor;
     GLfloat polygon_offset_units;
+    GLdouble depth_clear_value;
     GLboolean stencil_test;
     GLboolean framebuffer_srgb;
     GLboolean polygon_offset_fill;
@@ -3164,8 +3478,12 @@ static WaterCompositeGLState gfx_opengl_save_water_state(void)
         glGetFloatv(GL_DEPTH_RANGE, depth_range);
         state.depth_range[0] = depth_range[0];
         state.depth_range[1] = depth_range[1];
+        GLfloat clear_value = 1.0f;
+        glGetFloatv(GL_DEPTH_CLEAR_VALUE, &clear_value);
+        state.depth_clear_value = clear_value;
     } else {
         glGetDoublev(GL_DEPTH_RANGE, state.depth_range);
+        glGetDoublev(GL_DEPTH_CLEAR_VALUE, &state.depth_clear_value);
     }
     glGetIntegerv(GL_STENCIL_FUNC, &state.stencil_func);
     glGetIntegerv(GL_STENCIL_REF, &state.stencil_ref);
@@ -3177,7 +3495,7 @@ static WaterCompositeGLState gfx_opengl_save_water_state(void)
     glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &state.polygon_offset_factor);
     glGetFloatv(GL_POLYGON_OFFSET_UNITS, &state.polygon_offset_units);
     state.stencil_test = glIsEnabled(GL_STENCIL_TEST);
-    state.framebuffer_srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
+    state.framebuffer_srgb = gfx_opengl_is_framebuffer_srgb_enabled();
     state.polygon_offset_fill = glIsEnabled(GL_POLYGON_OFFSET_FILL);
     return state;
 }
@@ -3232,6 +3550,11 @@ static void gfx_opengl_restore_water_state(const WaterCompositeGLState &state)
     }
     gfx_opengl_set_depth_range((float)state.depth_range[0],
                                (float)state.depth_range[1]);
+    if (gl_es && glClearDepthf != nullptr) {
+        glClearDepthf((GLfloat)state.depth_clear_value);
+    } else if (glClearDepth != nullptr) {
+        glClearDepth(state.depth_clear_value);
+    }
     if (state.stencil_test) glEnable(GL_STENCIL_TEST); else glDisable(GL_STENCIL_TEST);
     glStencilFunc((GLenum)state.stencil_func, state.stencil_ref,
                   (GLuint)state.stencil_value_mask);
@@ -3240,7 +3563,7 @@ static void gfx_opengl_restore_water_state(const WaterCompositeGLState &state)
                 (GLenum)state.stencil_pass_depth_pass);
     glStencilMask((GLuint)state.stencil_write_mask);
     glPolygonOffset(state.polygon_offset_factor, state.polygon_offset_units);
-    if (state.framebuffer_srgb) glEnable(GL_FRAMEBUFFER_SRGB); else glDisable(GL_FRAMEBUFFER_SRGB);
+    gfx_opengl_set_framebuffer_srgb(state.framebuffer_srgb);
     if (state.polygon_offset_fill) glEnable(GL_POLYGON_OFFSET_FILL); else glDisable(GL_POLYGON_OFFSET_FILL);
     for (GLuint attribute = 0; attribute < kWaterSavedVertexAttributes; ++attribute) {
         glBindBuffer(GL_ARRAY_BUFFER,
@@ -3259,6 +3582,346 @@ static void gfx_opengl_restore_water_state(const WaterCompositeGLState &state)
     glBindBuffer(GL_ARRAY_BUFFER, (GLuint)state.array_buffer);
     glDepthMask(state.depth_mask);
     glDepthFunc((GLenum)state.depth_func);
+}
+
+static WaterCompositeGLState shadow_capture_saved_gl_state = {};
+static bool shadow_capture_gl_state_saved = false;
+static void gfx_opengl_end_shadow_scene_capture(void);
+
+static bool gfx_opengl_shadow_supported(void)
+{
+    if (!gfx_framebuffers_enabled || glGenFramebuffers == nullptr ||
+        glBindFramebuffer == nullptr || glFramebufferTexture2D == nullptr ||
+        glCheckFramebufferStatus == nullptr || glReadBuffer == nullptr ||
+        glGenTextures == nullptr ||
+        glTexImage2D == nullptr || glCreateShader == nullptr ||
+        glCreateProgram == nullptr || glBindBuffer == nullptr ||
+        glBufferData == nullptr || glDrawArrays == nullptr ||
+        glUseProgram == nullptr || glActiveTexture == nullptr) {
+        return false;
+    }
+    GLint texture_units = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &texture_units);
+    if (texture_units < 7) {
+        return false;
+    }
+    if ((gl_core_profile || gl_es) &&
+        (glGenVertexArrays == nullptr || glBindVertexArray == nullptr)) {
+        return false;
+    }
+    return true;
+}
+
+static GLuint gfx_opengl_compile_shadow_stage(GLenum stage,
+                                               const char *source)
+{
+    const GLuint shader = glCreateShader(stage);
+    if (shader == 0) {
+        return 0;
+    }
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+    if (compiled == GL_TRUE) {
+        return shader;
+    }
+    char log[1024] = {};
+    GLsizei log_length = 0;
+    glGetShaderInfoLog(shader, sizeof(log), &log_length, log);
+    sysLogPrintf(LOG_WARNING,
+                 "graphics: optional shadow shader compilation failed: %s",
+                 log_length > 0 ? log : "no compiler log");
+    glDeleteShader(shader);
+    return 0;
+}
+
+static bool gfx_opengl_ensure_shadow_program(void)
+{
+    if (shadow_map_program != 0) {
+        return true;
+    }
+    char vertex_source[512] = {};
+    char fragment_source[256] = {};
+    const char *input_qualifier = gl_glsl_version >= 130 ? "in" : "attribute";
+    const char *vertex_precision = gl_es ? "precision highp float;\n" : "";
+    const char *fragment_precision = gl_es ? "precision mediump float;\n" : "";
+    snprintf(vertex_source, sizeof(vertex_source),
+             "#version %s\n%s%s vec3 aShadowPosition;\n"
+             "uniform mat4 uShadowLightSpace;\n"
+             "void main() { gl_Position = uShadowLightSpace * vec4(aShadowPosition, 1.0); }\n",
+             gl_glsl_version_str, vertex_precision, input_qualifier);
+    snprintf(fragment_source, sizeof(fragment_source),
+             "#version %s\n%svoid main() { }\n",
+             gl_glsl_version_str, fragment_precision);
+
+    const GLuint vertex_shader =
+        gfx_opengl_compile_shadow_stage(GL_VERTEX_SHADER, vertex_source);
+    if (vertex_shader == 0) {
+        return false;
+    }
+    const GLuint fragment_shader =
+        gfx_opengl_compile_shadow_stage(GL_FRAGMENT_SHADER, fragment_source);
+    if (fragment_shader == 0) {
+        glDeleteShader(vertex_shader);
+        return false;
+    }
+
+    const GLuint program = glCreateProgram();
+    if (program == 0) {
+        glDeleteShader(vertex_shader);
+        glDeleteShader(fragment_shader);
+        return false;
+    }
+    glAttachShader(program, vertex_shader);
+    glAttachShader(program, fragment_shader);
+    glBindAttribLocation(program, 0, "aShadowPosition");
+    glLinkProgram(program);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    glDetachShader(program, vertex_shader);
+    glDetachShader(program, fragment_shader);
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+    if (linked != GL_TRUE) {
+        char log[1024] = {};
+        GLsizei log_length = 0;
+        glGetProgramInfoLog(program, sizeof(log), &log_length, log);
+        sysLogPrintf(LOG_WARNING,
+                     "graphics: optional shadow program link failed: %s",
+                     log_length > 0 ? log : "no linker log");
+        glDeleteProgram(program);
+        return false;
+    }
+    shadow_map_position_location = glGetAttribLocation(program,
+                                                        "aShadowPosition");
+    shadow_map_matrix_location = glGetUniformLocation(program,
+                                                       "uShadowLightSpace");
+    if (shadow_map_position_location < 0 || shadow_map_matrix_location < 0) {
+        glDeleteProgram(program);
+        shadow_map_position_location = -1;
+        shadow_map_matrix_location = -1;
+        return false;
+    }
+    shadow_map_program = program;
+    return true;
+}
+
+static bool gfx_opengl_ensure_shadow_resources(void)
+{
+    if (shadow_resources_failed || !gfx_opengl_shadow_supported()) {
+        return false;
+    }
+    if (!gfx_opengl_ensure_shadow_program()) {
+        shadow_resources_failed = true;
+        return false;
+    }
+    GLint max_texture_size = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
+    if (max_texture_size < 256) {
+        shadow_resources_failed = true;
+        return false;
+    }
+    const uint32_t resolution = static_cast<uint32_t>(
+        std::min<GLint>(max_texture_size, kShadowMapResolution));
+
+    if (shadow_map_fbo == 0) {
+        glGenFramebuffers(1, &shadow_map_fbo);
+    }
+    if (shadow_map_texture == 0) {
+        glGenTextures(1, &shadow_map_texture);
+    }
+    if (shadow_map_vbo == 0) {
+        glGenBuffers(1, &shadow_map_vbo);
+    }
+    if ((gl_core_profile || gl_es) && shadow_map_vao == 0) {
+        glGenVertexArrays(1, &shadow_map_vao);
+    }
+    if (shadow_map_fbo == 0 || shadow_map_texture == 0 || shadow_map_vbo == 0 ||
+        ((gl_core_profile || gl_es) && shadow_map_vao == 0)) {
+        shadow_resources_failed = true;
+        return false;
+    }
+
+    if (shadow_map_allocated_resolution == resolution) {
+        return true;
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, shadow_map_texture);
+    const GLenum depth_upload_type = gl_es ? GL_UNSIGNED_INT : GL_FLOAT;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24,
+                 static_cast<GLsizei>(resolution),
+                 static_cast<GLsizei>(resolution), 0, GL_DEPTH_COMPONENT,
+                 depth_upload_type, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, shadow_map_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, shadow_map_texture, 0);
+    gfx_opengl_set_draw_buffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        shadow_map_ready = false;
+        shadow_resources_failed = true;
+        sysLogPrintf(LOG_WARNING,
+                     "graphics: shadow depth framebuffer incomplete (0x%x)",
+                     static_cast<unsigned>(status));
+        return false;
+    }
+    shadow_map_resolution = resolution;
+    shadow_map_allocated_resolution = resolution;
+    return true;
+}
+
+static bool gfx_opengl_begin_shadow_scene_capture(void)
+{
+    if (shadow_capture_gl_state_saved || shadow_resources_failed ||
+        !gfx_opengl_shadow_supported()) {
+        return false;
+    }
+    shadow_capture_saved_gl_state = gfx_opengl_save_water_state();
+    shadow_capture_gl_state_saved = true;
+    if (!gfx_opengl_ensure_shadow_resources()) {
+        gfx_opengl_end_shadow_scene_capture();
+        return false;
+    }
+    return true;
+}
+
+static void gfx_opengl_end_shadow_scene_capture(void)
+{
+    if (!shadow_capture_gl_state_saved) {
+        return;
+    }
+    gfx_opengl_restore_water_state(shadow_capture_saved_gl_state);
+    shadow_capture_gl_state_saved = false;
+}
+
+static bool gfx_opengl_render_shadow_map(const float *view_space_vertices,
+                                         size_t vertex_count,
+                                         const float direction_to_light[3])
+{
+    shadow_map_ready = false;
+    if (view_space_vertices == nullptr || vertex_count < 3 ||
+        vertex_count % 3 != 0 ||
+        vertex_count > geShadowMaximumVertexCount ||
+        direction_to_light == nullptr ||
+        vertex_count > static_cast<size_t>(std::numeric_limits<GLsizei>::max()) ||
+        vertex_count > static_cast<size_t>(
+            std::numeric_limits<GLsizeiptr>::max() / (3 * sizeof(float)))) {
+        return false;
+    }
+    static bool stale_gl_error_reported = false;
+    GLenum stale_error = GL_NO_ERROR;
+    for (int drain = 0; drain < 16; ++drain) {
+        const GLenum error = glGetError();
+        if (error == GL_NO_ERROR) {
+            break;
+        }
+        if (stale_error == GL_NO_ERROR) {
+            stale_error = error;
+        }
+    }
+    if (stale_error != GL_NO_ERROR && !stale_gl_error_reported) {
+        sysLogPrintf(LOG_WARNING,
+                     "graphics: clearing pre-existing GL error 0x%x before optional shadow pass",
+                     static_cast<unsigned>(stale_error));
+        stale_gl_error_reported = true;
+    }
+    WaterCompositeGLState saved = gfx_opengl_save_water_state();
+    GeShadowMatrix light_space = {};
+    if (!geShadowBuildDirectionalMatrix(view_space_vertices, vertex_count,
+                                        direction_to_light, 0.05f,
+                                        &light_space) ||
+        !gfx_opengl_ensure_shadow_resources()) {
+        gfx_opengl_restore_water_state(saved);
+        return false;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, shadow_map_fbo);
+    gfx_opengl_set_draw_buffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    glViewport(0, 0, static_cast<GLsizei>(shadow_map_resolution),
+               static_cast<GLsizei>(shadow_map_resolution));
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    gfx_opengl_set_depth_range(0.0f, 1.0f);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    if (gl_es && glClearDepthf != nullptr) {
+        glClearDepthf(1.0f);
+    } else if (glClearDepth != nullptr) {
+        glClearDepth(1.0);
+    }
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    if (shadow_map_vao != 0) {
+        glBindVertexArray(shadow_map_vao);
+    }
+    glUseProgram(shadow_map_program);
+    glUniformMatrix4fv(shadow_map_matrix_location, 1, GL_FALSE,
+                       light_space.column_major);
+    glBindBuffer(GL_ARRAY_BUFFER, shadow_map_vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(vertex_count * 3 * sizeof(float)),
+                 view_space_vertices, GL_STREAM_DRAW);
+    glEnableVertexAttribArray(
+        static_cast<GLuint>(shadow_map_position_location));
+    glVertexAttribPointer(static_cast<GLuint>(shadow_map_position_location),
+                          3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertex_count));
+
+    const GLenum render_error = glGetError();
+    gfx_opengl_restore_water_state(saved);
+    if (render_error != GL_NO_ERROR) {
+        shadow_resources_failed = true;
+        sysLogPrintf(LOG_WARNING,
+                     "graphics: shadow depth pass failed with GL error 0x%x",
+                     static_cast<unsigned>(render_error));
+        return false;
+    }
+    shadow_light_space = light_space;
+    shadow_map_ready = true;
+    return true;
+}
+
+static void gfx_opengl_release_shadow_resources(void)
+{
+    shadow_map_ready = false;
+    if (shadow_map_program != 0) {
+        glDeleteProgram(shadow_map_program);
+        shadow_map_program = 0;
+    }
+    if (shadow_map_vao != 0) {
+        glDeleteVertexArrays(1, &shadow_map_vao);
+        shadow_map_vao = 0;
+    }
+    if (shadow_map_vbo != 0) {
+        glDeleteBuffers(1, &shadow_map_vbo);
+        shadow_map_vbo = 0;
+    }
+    if (shadow_map_fbo != 0) {
+        glDeleteFramebuffers(1, &shadow_map_fbo);
+        shadow_map_fbo = 0;
+    }
+    if (shadow_map_texture != 0) {
+        glDeleteTextures(1, &shadow_map_texture);
+        shadow_map_texture = 0;
+    }
+    shadow_map_position_location = -1;
+    shadow_map_matrix_location = -1;
+    shadow_map_resolution = kShadowMapResolution;
+    shadow_map_allocated_resolution = 0;
+    shadow_resources_failed = false;
 }
 
 static WaterCompositeGLState water_reflection_saved_state = {};
@@ -3652,7 +4315,7 @@ static bool gfx_opengl_draw_water_composite(const struct GfxWaterCompositeVertex
     /* The water shader owns the linear-to-sRGB conversion explicitly.  Do
      * not let an inherited GL_FRAMEBUFFER_SRGB state encode it a second time;
      * the saved state is restored on every exit path below. */
-    glDisable(GL_FRAMEBUFFER_SRGB);
+    gfx_opengl_set_framebuffer_srgb(false);
     if (getenv("GE_WATER_TRACE") != nullptr &&
         water_composite_shader_trace_events < 8) {
         sysLogPrintf(LOG_NOTE,
@@ -3960,6 +4623,13 @@ static bool gfx_opengl_draw_water_composite(const struct GfxWaterCompositeVertex
                     ? 1.0f : 0.0f);
     glUniform1f(water_composite_reflection_valid_location,
                 reflection_texture_valid ? 1.0f : 0.0f);
+    glUniform3f(water_composite_light_direction_location,
+                -0.35f, 0.78f, 0.42f);
+    glUniform3f(water_composite_light_color_location,
+                1.0f, 0.86f, 0.62f);
+    glUniform1f(water_composite_shininess_location,
+                geWaterCompositeTier(render_tier) > GE_WATER_COMPOSITE_ENHANCED
+                    ? 96.0f : 64.0f);
     if (getenv("GE_WATER_TRACE") != nullptr &&
         water_composite_shader_trace_events < 8) {
         sysLogPrintf(LOG_NOTE,
@@ -4007,6 +4677,7 @@ static void gfx_opengl_set_anisotropy_level(int level) {
 }
 
 static void gfx_opengl_destroy(void) {
+    gfx_opengl_release_shadow_resources();
     gfx_opengl_release_water_resources();
     if (opengl_vbo != 0) {
         glDeleteBuffers(1, &opengl_vbo);
@@ -4066,5 +4737,8 @@ struct GfxRenderingAPI gfx_opengl_api = {
     gfx_opengl_end_reflected_camera,
     gfx_opengl_capture_postfx_depth,
     gfx_opengl_get_postfx_depth_texture,
-    gfx_opengl_destroy
+    gfx_opengl_destroy,
+    gfx_opengl_begin_shadow_scene_capture,
+    gfx_opengl_end_shadow_scene_capture,
+    gfx_opengl_render_shadow_map
 };

@@ -11,12 +11,15 @@ fi
 
 BDD_DISPLAY="${GE_BDD_DISPLAY:-${DISPLAY:-}}"
 if [[ -z "${BDD_DISPLAY}" ]]; then
-    if [[ -S /tmp/.X11-unix/X1 ]]; then
-        BDD_DISPLAY=":1"
-    else
-        echo "SKIP: PC BDD requires an X11/XWayland display"
-        exit 77
+    if command -v xvfb-run >/dev/null 2>&1; then
+        # Never infer :1 from a socket: that may be the user's active
+        # Xwayland session. Give headless CTest runs an isolated software GL
+        # display; explicit DISPLAY/GE_BDD_DISPLAY remains opt-in for driver
+        # or compositor validation.
+        exec xvfb-run -a -s '-screen 0 640x480x24' bash "$0" "$@"
     fi
+    echo "SKIP: PC BDD needs an explicit display or xvfb-run"
+    exit 77
 fi
 
 BDD_RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -26,7 +29,14 @@ if [[ ! -d "${BDD_RUNTIME}" ]]; then
 fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ge007-bdd.XXXXXX")"
-trap 'rm -rf "${TMP_DIR}"' EXIT
+cleanup_bdd_artifacts() {
+    if [[ "${GE_BDD_KEEP_TMP:-0}" == 1 ]]; then
+        echo "BDD artifacts preserved at ${TMP_DIR}"
+        return
+    fi
+    rm -rf -- "${TMP_DIR}"
+}
+trap cleanup_bdd_artifacts EXIT
 
 export DISPLAY="${BDD_DISPLAY}"
 export XDG_RUNTIME_DIR="${BDD_RUNTIME}"
@@ -367,6 +377,17 @@ assert_water_shader_compiled() {
     assert_absent "${name}" "${log}" 'WATER_COMPOSITE: shader uniforms unavailable'
 }
 
+assert_render_frame_budget_completed() {
+    local name="$1"
+    local log="$2"
+
+    if ! rg -q 'TEST_FRAME_EXIT: frames=[0-9]+ limit=[0-9]+' "${log}"; then
+        echo "FAIL: ${name} exited successfully without reaching its frame-budget completion marker"
+        sed -n '1,220p' "${log}"
+        exit 1
+    fi
+}
+
 assert_water_framebuffer_readback() {
     local name="$1"
     local log="$2"
@@ -377,10 +398,9 @@ assert_water_framebuffer_readback() {
         return 0
     fi
 
-    local dump_dir="${ROOT_DIR}/ppm"
     local newest_dump
-    newest_dump="$(find "${dump_dir}" -maxdepth 1 -type f -name 'frame_*.ppm' \
-        -newer "${WATER_PIXEL_MARKER}" -print 2>/dev/null | sort | tail -1)"
+    newest_dump="$(find "${WATER_DUMP_DIR}" -maxdepth 1 -type f \
+        -name 'frame_*.ppm' -print 2>/dev/null | sort | tail -1)"
     if [[ -z "${newest_dump}" ]]; then
         echo "FAIL: ${name} produced no framebuffer readback"
         sed -n '1,220p' "${log}"
@@ -396,15 +416,15 @@ assert_water_framebuffer_readback() {
 water_pixel_oracle="${GE_BDD_PIXEL_ORACLE:-${ROOT_DIR}/build-pc/ge007_water_render_pixel_oracle_test}"
 
 water_dump_files() {
-    find "${ROOT_DIR}/ppm" -maxdepth 1 -type f -name 'frame_*.ppm' \
-        -newer "${WATER_PIXEL_MARKER}" -print 2>/dev/null | sort
+    find "${WATER_DUMP_DIR}" -maxdepth 1 -type f -name 'frame_*.ppm' \
+        -print 2>/dev/null | sort
 }
 
 assert_water_pixel_variance() {
     local name="$1"
     if [[ "${GE_BDD_PIXEL_ASSERT:-0}" != 1 ]]; then return 0; fi
     local first
-    first="$(water_dump_files | head -1)"
+    first="$(water_dump_files | tail -1)"
     [[ -n "${first}" && -x "${water_pixel_oracle}" ]] || {
         echo "FAIL: ${name} did not produce a usable water pixel oracle input"
         exit 1
@@ -416,7 +436,7 @@ assert_water_reflection_asymmetry() {
     local name="$1"
     if [[ "${GE_BDD_PIXEL_ASSERT:-0}" != 1 ]]; then return 0; fi
     local first
-    first="$(water_dump_files | head -1)"
+    first="$(water_dump_files | tail -1)"
     [[ -n "${first}" && -x "${water_pixel_oracle}" ]] || {
         echo "FAIL: ${name} did not produce a reflection pixel oracle input"
         exit 1
@@ -424,16 +444,16 @@ assert_water_reflection_asymmetry() {
     "${water_pixel_oracle}" --reflection-asymmetry "${first}"
 }
 
-assert_water_occluder_mask() {
+assert_water_surface_edge_signal() {
     local name="$1"
     if [[ "${GE_BDD_PIXEL_ASSERT:-0}" != 1 ]]; then return 0; fi
     local first
-    first="$(water_dump_files | head -1)"
+    first="$(water_dump_files | tail -1)"
     [[ -n "${first}" && -x "${water_pixel_oracle}" ]] || {
-        echo "FAIL: ${name} did not produce an occluder pixel oracle input"
+        echo "FAIL: ${name} did not produce a water surface pixel oracle input"
         exit 1
     }
-    "${water_pixel_oracle}" --occluder-mask "${first}"
+    "${water_pixel_oracle}" --surface-edge-signal "${first}"
 }
 
 assert_water_temporal_change() {
@@ -451,12 +471,32 @@ assert_water_viewport_isolation() {
     local name="$1"
     if [[ "${GE_BDD_PIXEL_ASSERT:-0}" != 1 ]]; then return 0; fi
     local first
-    first="$(water_dump_files | head -1)"
+    first="$(water_dump_files | tail -1)"
     [[ -n "${first}" && -x "${water_pixel_oracle}" ]] || {
         echo "FAIL: ${name} did not produce a split-viewport pixel oracle input"
         exit 1
     }
     "${water_pixel_oracle}" --viewport-isolation "${first}"
+}
+
+model_pixel_oracle="${GE_BDD_MODEL_PIXEL_ORACLE:-${ROOT_DIR}/build-pc/ge007_model_render_pixel_oracle_test}"
+
+assert_coop_model_pixels() {
+    local name="$1"
+    local log="$2"
+    local dump_dir="$3"
+    local capture="${dump_dir}/frame_000100.ppm"
+
+    if [[ ! -x "${model_pixel_oracle}" || ! -f "${capture}" ]]; then
+        echo "FAIL: ${name} did not produce the deterministic model framebuffer capture"
+        sed -n '1,220p' "${log}"
+        exit 1
+    fi
+    if ! "${model_pixel_oracle}" --check-coop-dam "${capture}"; then
+        echo "FAIL: ${name} rendered the seeded co-op player/prop regions black or missing"
+        sed -n '1,220p' "${log}"
+        exit 1
+    fi
 }
 
 run_case() {
@@ -474,6 +514,20 @@ run_case() {
     fi
     shift
 
+    local expects_frame_budget=0
+    local has_early_exit_boundary=0
+    local argument
+    for argument in "$@"; do
+        if [[ "${argument}" == *GE_BDD_EXIT_AFTER_FRAMES* ]]; then
+            expects_frame_budget=1
+        fi
+        if [[ "${argument}" == *GE_STAGE_SMOKE_EXIT* ||
+              "${argument}" == *GE_VIEWPORT_TRACE_EXIT* ||
+              "${argument}" == *GE_SIGHT_TRACE_EXIT* ]]; then
+            has_early_exit_boundary=1
+        fi
+    done
+
     local log="${TMP_DIR}/${name}.log"
     set +e
     env "$@" >"${log}" 2>&1
@@ -489,6 +543,10 @@ run_case() {
         echo "FAIL: ${name} exited ${status}"
         sed -n '1,220p' "${log}"
         exit 1
+    fi
+
+    if ((expects_frame_budget != 0 && has_early_exit_boundary == 0)); then
+        assert_render_frame_budget_completed "${name}" "${log}"
     fi
 
     if rg -n -e 'FATAL|Crashed|SIGSEGV|AddressSanitizer|stack smashing' "${log}"; then
@@ -508,14 +566,12 @@ run_case() {
 }
 
 common_timeout=(timeout 60s "${BINARY}")
-# Rendering probes intentionally stay alive long enough to submit real display
-# lists. A timeout is an expected harness boundary here; assertions below must
-# still prove that both renderer rectangles were observed and non-overlapping.
-# The split renderer probes opt into a clean exit immediately after both
-# rectangles reach the real GL mapping; the other render probe remains bounded
-# by a timeout while its own trace assertion runs.
-render_probe=(bash -c ': "${GE_BDD_EXIT_AFTER_FRAMES:=24}"; export GE_BDD_EXIT_AFTER_FRAMES; timeout -k 2s 30s "$@"; status=$?; if [[ "${status}" -eq 124 || "${status}" -eq 137 ]]; then exit 0; fi; exit "${status}"' ge007-render "${BINARY}")
-menu_render_probe=(bash -c ': "${GE_BDD_EXIT_AFTER_FRAMES:=1800}"; export GE_BDD_EXIT_AFTER_FRAMES; timeout -k 2s 35s "$@"; status=$?; if [[ "${status}" -eq 124 || "${status}" -eq 137 ]]; then exit 0; fi; exit "${status}"' ge007-menu-render "${BINARY}")
+# Rendering probes finish on an explicit frame budget unless they have a
+# narrower stage/viewport exit. The wall-clock limit is only a hang guard and
+# its timeout status is always a failure; ordinary probes must log the frame
+# completion marker before their other behavior assertions are considered.
+render_probe=(bash -c ': "${GE_BDD_EXIT_AFTER_FRAMES:=24}"; export GE_BDD_EXIT_AFTER_FRAMES; timeout -k 2s 30s "$@"' ge007-render "${BINARY}")
+menu_render_probe=(bash -c ': "${GE_BDD_EXIT_AFTER_FRAMES:=1800}"; export GE_BDD_EXIT_AFTER_FRAMES; timeout -k 2s 120s "$@"' ge007-menu-render "${BINARY}")
 
 # GPU Gems water shaders have separate source paths for legacy desktop GLSL,
 # modern desktop GLSL, and GLES. The matrix is opt-in because a machine may
@@ -541,23 +597,25 @@ run_water_profile_case() {
     assert_water_shader_compiled "${name}" "${TMP_DIR}/${name}.log"
 }
 
-WATER_PIXEL_MARKER="${TMP_DIR}/water-pixel-marker-inactive"
+WATER_DUMP_DIR="${TMP_DIR}/water-pixel-dump-inactive"
 water_pixel_env=()
 water_render_probe=("${render_probe[@]}")
 if [[ "${GE_BDD_PIXEL_ASSERT:-0}" == 1 ]]; then
-    # Stage smoke has a deterministic loading/transition interval around the
-    # earlier frames. Capture two stable post-load frames far enough apart to
-    # expose the configured wave phase while keeping both the frame budget and
-    # water clock fixed. A short capture can be numerically valid yet appear
-    # unchanged after 8-bit quantization.
-    water_pixel_env=(GE_PCDUMP=91-191:100)
-    water_render_probe=(bash -c ': "${GE_BDD_EXIT_AFTER_FRAMES:=200}"; : "${GE_WATER_TEST_FIXED_DELTA:=0.25}"; export GE_BDD_EXIT_AFTER_FRAMES GE_WATER_TEST_FIXED_DELTA; timeout -k 2s 30s "$@"; status=$?; if [[ "${status}" -eq 124 || "${status}" -eq 137 ]]; then exit 0; fi; exit "${status}"' ge007-water-pixel-render "${BINARY}")
+    # Early post-boot captures can still be the all-black loading framebuffer.
+    # Use the latest of two post-load world frames for spatial assertions, and
+    # compare those same stable frames for temporal movement.
+    water_pixel_env=(GE_PCDUMP=191-291:100)
+    water_render_probe=(bash -c ': "${GE_BDD_EXIT_AFTER_FRAMES:=300}"; : "${GE_WATER_TEST_FIXED_DELTA:=0.25}"; export GE_BDD_EXIT_AFTER_FRAMES GE_WATER_TEST_FIXED_DELTA; timeout -k 2s 120s "$@"' ge007-water-pixel-render "${BINARY}")
 fi
 
 mark_water_pixel_capture() {
     local name="$1"
-    WATER_PIXEL_MARKER="${TMP_DIR}/${name}.pixel-marker"
-    touch "${WATER_PIXEL_MARKER}"
+    WATER_DUMP_DIR="${TMP_DIR}/${name}-ppm"
+    if [[ "${GE_BDD_PIXEL_ASSERT:-0}" == 1 ]]; then
+        mkdir -p "${WATER_DUMP_DIR}"
+        water_pixel_env=(GE_PCDUMP=191-291:100
+                         "GE_PCDUMP_DIR=${WATER_DUMP_DIR}")
+    fi
 }
 # The mode selector is navigated with controller D-pad presses: down moves
 # solo -> multiplayer -> co-op. This protects the controller-only path rather
@@ -655,7 +713,7 @@ assert_absent water_material_enhanced "${TMP_DIR}/water_material_enhanced.log" '
 assert_water_framebuffer_readback water_material_enhanced "${TMP_DIR}/water_material_enhanced.log"
 assert_water_pixel_variance water_material_enhanced
 assert_water_reflection_asymmetry water_material_enhanced
-assert_water_occluder_mask water_material_enhanced
+assert_water_surface_edge_signal water_material_enhanced
 assert_water_temporal_change water_material_enhanced
 
 # water_material_remaster remains the compatibility label for this tier; the
@@ -681,7 +739,7 @@ assert_water_shader_compiled water_world_surface_frigate "${TMP_DIR}/water_world
 assert_water_framebuffer_readback water_world_surface_frigate "${TMP_DIR}/water_world_surface_frigate.log"
 assert_water_pixel_variance water_world_surface_frigate
 assert_water_reflection_asymmetry water_world_surface_frigate
-assert_water_occluder_mask water_world_surface_frigate
+assert_water_surface_edge_signal water_world_surface_frigate
 assert_water_temporal_change water_world_surface_frigate
 
 run_case water_dam_occlusion \
@@ -818,7 +876,9 @@ run_case briefing_vector_text \
     GE_FAKE_CONTROLLERS=1 \
     GE_STARTMENU=6 \
     GE_D243=1 \
-    GE_INPUTSCRIPT='60:DOWN;120:A;300:A;460:A;620:A' \
+    GE_INPUTSCRIPT='12:DOWN;24:A;36:A;48:A;60:A' \
+    GE_BDD_EXIT_AFTER_FRAMES=60 \
+    GE_POSTFX=0 \
     "${menu_render_probe[@]}"
 assert_vector_text_stable briefing_vector_text "${TMP_DIR}/briefing_vector_text.log"
 assert_vector_text_builds_atomic briefing_vector_text "${TMP_DIR}/briefing_vector_text.log"
@@ -838,6 +898,8 @@ run_case coop_menu \
     GE_STARTMENU=6 \
     GE_D243=1 \
     GE_INPUTSCRIPT="${coop_menu_script}" \
+    GE_BDD_EXIT_AFTER_FRAMES=1800 \
+    GE_POSTFX=0 \
     GE_STAGE_SMOKE=1 \
     GE_COOP_SMOKE=1 \
     GE_COOP_SPAWN_LOG=1 \
@@ -873,6 +935,33 @@ run_case resume_coop_two \
     "${render_probe[@]}" -level_33
 assert_distinct_positions resume_coop_two "${TMP_DIR}/resume_coop_two.log"
 assert_split_render_viewports resume_coop_two "${TMP_DIR}/resume_coop_two.log"
+
+# Unlike the structural viewport case above, this seeded frame asserts actual
+# colored model pixels in both co-op views. Keep it unconditional: a black
+# player/prop framebuffer is a renderer regression, not an optional water
+# screenshot diagnostic.
+MODEL_PIXEL_DUMP_DIR="${TMP_DIR}/coop_model_pixels_remaster-ppm"
+mkdir -p "${MODEL_PIXEL_DUMP_DIR}"
+run_case coop_model_pixels_remaster \
+    'STAGE_SMOKE: mode=3 stage=33 players=2 viewports=2' \
+    'COOP_SMOKE: stage=33 players=2 viewports=2' \
+    -- \
+    GE_RENDER_MODE=2 \
+    GE_RSEED=deadbeef \
+    GE_FAKE_CONTROLLERS=2 \
+    GE_RESUME_MODE=coop \
+    GE_STAGE_SMOKE=1 \
+    GE_COOP_SMOKE=1 \
+    GE_COOP_SPAWN_LOG=1 \
+    GE_VIEWPORT_SMOKE=1 \
+    GE_VIEWPORT_TRACE=1 \
+    GE_BDD_EXIT_AFTER_FRAMES=120 \
+    GE_PCDUMP=100-100 \
+    "GE_PCDUMP_DIR=${MODEL_PIXEL_DUMP_DIR}" \
+    "${render_probe[@]}" -level_33
+assert_coop_model_pixels coop_model_pixels_remaster \
+    "${TMP_DIR}/coop_model_pixels_remaster.log" \
+    "${MODEL_PIXEL_DUMP_DIR}"
 
 run_case resume_coop_as_solo \
     'STAGE_SMOKE: mode=0 stage=33 players=1 viewports=1' \

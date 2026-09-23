@@ -13,10 +13,29 @@
  * decision beside the bump policy gives shader generation and VBO packing one
  * authoritative contract instead of two subtly different `used_textures`
  * checks. */
-static inline int geFast3dMaterialUsesViewPosition(int used_texture0,
-                                                   int bump_maps_enabled)
+static inline int geFast3dMaterialUsesBumpMapping(int used_texture0,
+                                                 int bump_maps_enabled)
 {
     return used_texture0 != 0 && bump_maps_enabled != 0;
+}
+
+/* Shadow receivers need view-space position even when the N64 combiner does
+ * not consume TEXEL0. Keep that requirement distinct from bump mapping, whose
+ * tangent frame specifically needs TEXEL0 coordinates. */
+struct GeFast3dMaterialRequirements {
+    int uses_view_position;
+    int uses_bump_mapping;
+};
+
+static inline GeFast3dMaterialRequirements geFast3dMaterialRequirements(
+    int used_texture0, int bump_maps_enabled, int shadow_mapping_enabled)
+{
+    GeFast3dMaterialRequirements requirements = {};
+    requirements.uses_bump_mapping =
+        geFast3dMaterialUsesBumpMapping(used_texture0, bump_maps_enabled);
+    requirements.uses_view_position =
+        requirements.uses_bump_mapping || shadow_mapping_enabled != 0;
+    return requirements;
 }
 
 static inline float geBumpWaterNormalStrength(int render_tier)

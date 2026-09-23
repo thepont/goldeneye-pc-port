@@ -272,6 +272,16 @@ static save_data *install_save(u32 folder, s32 slot)
     return &saves[slot];
 }
 
+static void prepare_eeprom_save(u32 folder, s32 slot, s32 sequence, s32 best_time)
+{
+    fake_eeprom_saves[slot] = (save_data)BLANKSAVEDATA;
+    fileSetSaveFoldernum(&fake_eeprom_saves[slot], folder);
+    fileSetSaveFlagDoReset(&fake_eeprom_saves[slot], FALSE);
+    fileResetSaveFlagSlot(&fake_eeprom_saves[slot], sequence);
+    fileSetDifficultyStageTime(&fake_eeprom_saves[slot], SP_LEVEL_DAM,
+                               DIFFICULTY_AGENT, best_time);
+}
+
 static void test_null_save_boundaries(void)
 {
     save_data untouched = (save_data)BLANKSAVEDATA;
@@ -289,6 +299,8 @@ static void test_null_save_boundaries(void)
                fileGetSelectedBond(NULL) == 0 &&
                !fileGetSaveFlagDoReset(NULL),
            "save bitfield getters use safe empty defaults for a missing save");
+    expect(!fileGetIsCheatUnlocked(NULL, 0),
+           "cheat lookup rejects a missing save instead of dereferencing it");
 
     fileSetSaveFoldernum(NULL, FOLDER3);
     fileResetSaveFlagSlot(NULL, 2);
@@ -311,6 +323,11 @@ static void test_save_bitfields(void)
                fileGetSelectedBond(&save) == (BOND_MOORE & 3) &&
                !fileGetSaveFlagDoReset(&save),
            "save folder, slot, bond, and reset bitfields round-trip");
+
+    fileSetSaveFlagDoReset(&save, TRUE);
+    expect(fileGetSaveFlagDoReset(&save),
+           "save reset bit can be enabled as well as cleared");
+    fileSetSaveFlagDoReset(&save, FALSE);
 
     fileSetSaveFoldernum(&save, 0xff);
     fileResetSaveFlagSlot(&save, -1);
@@ -361,7 +378,11 @@ static void test_packed_stage_times(void)
     memset(save.times, 0x5a, sizeof(save.times));
     fileSetDifficultyStageTime(&save, SP_LEVEL_MAX, DIFFICULTY_AGENT, 10);
     fileSetDifficultyStageTime(&save, SP_LEVEL_DAM, DIFFICULTY_MULTI, 10);
-    expect(save.times[0] == 0x5a && save.times[1] == 0x5a,
+    expect(fileGetSaveStageDifficultyTime(&save, SP_LEVEL_MAX,
+                                          DIFFICULTY_AGENT) == 0 &&
+               fileGetSaveStageDifficultyTime(&save, SP_LEVEL_DAM,
+                                              DIFFICULTY_MULTI) == 0 &&
+               save.times[0] == 0x5a && save.times[1] == 0x5a,
            "invalid stage and difficulty leave packed save data untouched");
 }
 
@@ -404,6 +425,13 @@ static void test_folder_lookup_and_stage_unlocks(void)
     expect(fileGetSaveFlagDoReset_any_folder() == SAVESLOT1,
            "the first reset-marked slot is selected for the next write");
 
+    for (s32 slot = SAVESLOT1; slot < SAVESLOTRAMROM; ++slot)
+    {
+        fileSetSaveFlagDoReset(&saves[slot], FALSE);
+    }
+    expect(fileGetSaveFlagDoReset_any_folder() == -1,
+           "save-slot scan reports no reset slot when every slot is active");
+
     expect(fileIsFolderValid(FOLDER1) && fileIsFolderValid(FOLDER4 - 1) &&
                fileIsFolderValid(RAMROM_FOLDERNUM) &&
                !fileIsFolderValid(FOLDER_INVALID) &&
@@ -440,6 +468,13 @@ static void test_folder_lookup_and_stage_unlocks(void)
                STAGESTATUS_UNLOCKED,
            "agent-level debug mode unlocks agent stages without a save");
     fake_agent_levels = FALSE;
+
+    fake_all_levels = TRUE;
+    expect(fileIsStageUnlockedAtDifficulty(FOLDER1, SP_LEVEL_EGYPT,
+                                           DIFFICULTY_007) ==
+               STAGESTATUS_UNLOCKED,
+           "all-level debug mode unlocks every difficulty without a save");
+    fake_all_levels = FALSE;
 }
 
 static void test_unlock_creates_and_preserves_progress(void)
@@ -532,6 +567,30 @@ static void test_eeprom_io_and_validation(void)
     expect(fake_write_calls > 0 &&
                fileGetSaveForFoldernum(FOLDER1) != NULL,
            "corrupt EEPROM data is reset before the folders are rebuilt");
+}
+
+static void GivenSequentialDuplicateFolderSaves_WhenValidatingEeprom_ThenNewestLogicalSaveSurvives(void)
+{
+    save_data *folder_save;
+
+    /* Arrange */
+    reset_storage();
+    fake_pak_present = TRUE;
+    fake_small_save.unk[0] =
+        SAVEFLAGS_SET(FOLDER3, SAVESLOT1, BOND_CONNERY, FALSE);
+    prepare_eeprom_save(FOLDER1, SAVESLOT1, 0, 10);
+    prepare_eeprom_save(FOLDER1, SAVESLOT2, 1, 20);
+    prepare_eeprom_save(FOLDER1, SAVESLOT3, 3, 30);
+
+    /* Act */
+    fileValidateSaves();
+
+    /* Assert */
+    folder_save = fileGetSaveForFoldernum(FOLDER1);
+    expect(folder_save != NULL &&
+               fileGetSaveStageDifficultyTime(folder_save, SP_LEVEL_DAM,
+                                               DIFFICULTY_AGENT) == 20,
+           "EEPROM validation keeps the newest sequential folder save and discards stale duplicates");
 }
 
 static void test_unlock_summaries_and_007_mode(void)
@@ -698,6 +757,34 @@ static void test_settings_round_trip(void)
            "multiplayer settings load forces the shared multiplayer control type");
 }
 
+static void test_missing_folder_mutations(void)
+{
+    save_data *save;
+
+    reset_storage();
+    fake_music_volume = 0x4000;
+    fake_sfx_volume = 0x2000;
+    fake_autoaim = TRUE;
+    fake_sight_on_screen = TRUE;
+    fake_lookahead = TRUE;
+    fake_ammo_on_screen = TRUE;
+    fileClearSavefileForFolder(FOLDER1);
+    save = fileGetSaveForFoldernum(FOLDER1);
+    expect(save != NULL && save->music_vol == (fake_music_volume >> 7) &&
+               save->sfx_vol == (fake_sfx_volume >> 7) &&
+               (save->options & DEFAULT_OPTIONS) == DEFAULT_OPTIONS,
+           "clearing a missing folder creates a save from current settings");
+
+    fileClearSavefileForFolder(FOLDER_INVALID);
+
+    reset_storage();
+    save_selected_bond[FOLDER1] = BOND_CONNERY;
+    fileUpdateSelectedBondInSave(FOLDER1);
+    save = fileGetSaveForFoldernum(FOLDER1);
+    expect(save != NULL && fileGetSelectedBond(save) == (BOND_CONNERY & 3),
+           "updating a missing folder creates a save for the selected Bond");
+}
+
 int main(void)
 {
     test_null_save_boundaries();
@@ -710,9 +797,11 @@ int main(void)
     test_folder_lookup_and_stage_unlocks();
     test_unlock_creates_and_preserves_progress();
     test_eeprom_io_and_validation();
+    GivenSequentialDuplicateFolderSaves_WhenValidatingEeprom_ThenNewestLogicalSaveSurvives();
     test_unlock_summaries_and_007_mode();
     test_cheat_copy_delete_and_bond_state();
     test_settings_round_trip();
+    test_missing_folder_mutations();
 
     if (failures != 0)
     {
