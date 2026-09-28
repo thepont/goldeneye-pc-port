@@ -737,6 +737,12 @@ if(BUILD_TESTING)
   add_test(NAME ge007_bump_mapping_policy
            COMMAND ge007_bump_mapping_policy_test)
 
+  add_executable(ge007_texture_wrap_policy_test
+    tests/texture_wrap_policy_test.cpp)
+  target_compile_features(ge007_texture_wrap_policy_test PRIVATE cxx_std_20)
+  add_test(NAME ge007_texture_wrap_policy
+           COMMAND ge007_texture_wrap_policy_test)
+
   add_executable(ge007_textured_vertex_stream_policy_test
     tests/textured_vertex_stream_policy_test.cpp)
   target_compile_definitions(ge007_textured_vertex_stream_policy_test PRIVATE

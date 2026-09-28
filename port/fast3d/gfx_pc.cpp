@@ -38,6 +38,7 @@
 #include "fast3d_ambient_lighting.h"
 #include "fast3d_light_state.h"
 #include "fast3d_normal_policy.h"
+#include "texture_wrap_policy.h"
 #include "bumpmap_runtime.h"
 #include "bump_mapping_policy.h"
 #include "fast3d_pointer_policy.h"
@@ -3963,22 +3964,33 @@ static void gfx_sp_tri1_vertices(struct LoadedVertex *v1,
             }
             tex_width[i] = line_size;
 
-            tex_width2[i] = (rdp.texture_tile[tile].lrs - rdp.texture_tile[tile].uls + 4) / 4;
-            tex_height2[i] = (rdp.texture_tile[tile].lrt - rdp.texture_tile[tile].ult + 4) / 4;
+            tex_width2[i] = geFast3dTileExtent(
+                rdp.texture_tile[tile].uls, rdp.texture_tile[tile].lrs);
+            tex_height2[i] = geFast3dTileExtent(
+                rdp.texture_tile[tile].ult, rdp.texture_tile[tile].lrt);
 
             uint32_t tex_width1 = tex_width[i] << (cms & G_TX_MIRROR);
             uint32_t tex_height1 = tex_height[i] << (cmt & G_TX_MIRROR);
 
-            if (g_wrap_fix && !(cms & G_TX_MIRROR)) {
+            if (g_wrap_fix && !(cms & G_TX_MIRROR) &&
+                geFast3dTileRectangleValid(
+                    rdp.texture_tile[tile].uls, rdp.texture_tile[tile].lrs,
+                    rdp.texture_tile[tile].ult, rdp.texture_tile[tile].lrt)) {
                 /* (a) sub-tile window: wrap tile (clamp bit not set) whose
                  * uls..lrs window is smaller than the uploaded image -> pre-fmod
                  * the UVs at the window size. */
-                if (!(cms & G_TX_CLAMP) && tex_width2[i] > 0 && tex_width2[i] < tex_width[i]) {
+                if (!(cms & G_TX_CLAMP) && geFast3dUseSubtileWrap(
+                        tex_width[i], tex_width2[i],
+                        rdp.texture_tile[tile].uls, rdp.texture_tile[tile].lrs,
+                        rdp.texture_tile[tile].masks)) {
                     wrap_s[i]   = true;
                     wrap_tw[i]  = (float)tex_width2[i];
                     wrap_uls[i] = rdp.texture_tile[tile].uls / 4.0f;
                 }
-                if (!(cmt & G_TX_CLAMP) && tex_height2[i] > 0 && tex_height2[i] < tex_height[i]) {
+                if (!(cmt & G_TX_CLAMP) && geFast3dUseSubtileWrap(
+                        tex_height[i], tex_height2[i],
+                        rdp.texture_tile[tile].ult, rdp.texture_tile[tile].lrt,
+                        rdp.texture_tile[tile].maskt)) {
                     wrap_t[i]   = true;
                     wrap_th[i]  = (float)tex_height2[i];
                     wrap_ult[i] = rdp.texture_tile[tile].ult / 4.0f;

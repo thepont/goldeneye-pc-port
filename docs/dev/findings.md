@@ -611,6 +611,9 @@ covers D24–D69; the log continues in §H (D32 procedure, D70–D121).
 | D321 | **D318 trigger chain fully mapped: tanks → combat bit is an authored ~3.5 s gas-cascade delay (chr 254 script); derail lands same-tick; PC behavior confirmed faithful to N64 (probe captures, 2026-09-20).** — full `## D321` entry at file tail | CLOSED — trigger chain mapped and faithful; D318 watchdog validated in live play. Optional deferred tuning: `D318_DEADLOCK_TICKS` 600→300 (user's call). |
 | D322 | **Long-session audio degradation: full campaign on v0.3.0 — audio progressively worsens from Silo, by Caverns/Cradle the OST is inaudible and SFX "come and go"; restarting the game restores it (issue #87, user report, 2026-09-21).** — full `## D322` entry at file tail | OPEN — static triage done (teardown audit, mixer statelessness, D202-coverage check); ranked hypotheses: voice-pool exhaustion/counter drift > queue starvation > evtq saturation. `GE_D322` pool-telemetry probe shipped; needs a campaign capture with `GE_D322=1 GE_D204=1`. |
 | D323 | **RULE-2-SIGNOFF: local two-player co-op mode reusing the deathmatch character roster (user request, 2026-09-22).** — full `## D323` entry at file tail | PARTIAL — RULE-2-SIGNOFF / IMPLEMENTED; automated gates pass, while a real two-controller playtest remains owed. |
+| D324 | **F10 overlay vector-font text was queued into the wrong frame batch (found by unit test, 2026-09-23).** — full `## D324` entry at file tail | FIXED — current-frame late queue added and covered by deterministic tests; real GPU confirmation remains owed. |
+| D325 | **F10 overlay bitmap fallback used vector advance metrics (found by unit test, 2026-09-23).** — full `## D325` entry at file tail | FIXED — bitmap fallback now uses bitmap metrics and is covered by deterministic tests. |
+| D326 | **Dam's pre-modern dark-teal water became bright lavender/checkered in the current `Original` renderer (matched-camera comparison, 2026-09-29).** — full `## D326` entry at file tail | PARTIAL — an independent unsigned tile-window defect is fixed and regression-tested, but the colour change remains in the two-cycle CI8 `PRIM_LOD_FRAC` render path; do not revert the correct 64-bit display-list write merely to reproduce the old appearance. |
 
 Phase 2 replaced the Phase-1 demo loop with the real `mainproc()` on real OS
 threads, compiled GE's real `src/sched.c`, and brought in PD's fast3d software
@@ -12335,3 +12338,41 @@ otherwise measures with the bitmap font for right-aligned and centered text.
 
 **Status:** FIXED by deterministic unit/regression tests. A live GPU screenshot
 is still useful for checking driver-specific raster quality.
+
+## D326 — Dam's pre-modern dark-teal water became bright lavender/checkered in the current `Original` renderer (matched-camera comparison, 2026-09-29).
+
+**Reported behavior.** The user observed that the original/pre-modern water
+texture had been modified. A deterministic room-35 Dam camera now proves the
+visible regression: the immediate pre-modern parent `9507669f` renders dark
+teal water, while current `Original` at `1d345f92` renders bright
+lavender/checkered water at the same position and angle. The current colour
+persists through frames 120–360, so this is not merely one bad animation phase.
+
+**Boundary and cause.** The authored texture asset was not replaced. Dam uses
+the two-layer CI8 display list in `src/game/unk_092E50.c`, blending `TEXEL0`
+and `TEXEL1` with `PRIM_LOD_FRAC`. Commit `7324a9ce` fixed the PC-side update
+of that fraction: the original `((u32 *)setup)[8]` assumes an 8-byte N64
+`Gfx`, but PC `Gfx` is 16 bytes. Keeping the old behavior would leave the
+fraction effectively static by writing the wrong command. That ABI correction
+is already covered by `ge007_unk_092e50_test` and must not be reverted to mask
+the renderer problem.
+
+**Adjacent red→green fix.** Fast3D's wrap helper calculated U10.2 tile extents
+with unsigned subtraction, so an animated end below its start underflowed. It
+could also treat an authored masked `0..0` full-image window as a literal
+one-texel sub-tile. `ge007_texture_wrap_policy` was first observed failing to
+link against the missing policy, then the new port-owned policy rejected
+inverted rectangles and preserved the full-image masked case. Matched current
+captures with `Video.WrapFix=1` and `Video.WrapFix=0` are both lavender,
+however, so this defect is not the primary colour change.
+
+**Evidence.** See
+`docs/dev/reviews/original-water-fidelity-2026-09-29.md` and its linked raw,
+side-by-side, and animation-cycle captures. No supported N64 emulator was
+available locally, so this review does not claim a matched-camera console
+oracle. Frigate/Surface sky-water and D229 are separate paths.
+
+**Status:** PARTIAL — the tile-window safety defect is fixed and tested; the
+remaining issue is the port renderer's two-cycle CI8 `TEXEL0`/`TEXEL1`
+interpolation under animated `PRIM_LOD_FRAC`. Preserve the 64-bit ABI fix and
+resolve the renderer path against a console reference.
