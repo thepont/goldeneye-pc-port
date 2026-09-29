@@ -166,6 +166,18 @@ static void test_lit_and_unlit_base_colour_policy(TestState &tests)
     geFast3dSelectVertexBaseColor(G_LIGHTING, ambient, authored, nullptr);
 }
 
+static void test_room_lighting_restore_respects_render_mode(TestState &tests)
+{
+    tests.expect(geFast3dShouldRestoreRoomLighting(0) == 0,
+                 "Original mode must preserve the ROM room-lighting state");
+    tests.expect(geFast3dShouldRestoreRoomLighting(1) != 0,
+                 "Enhanced mode must restore room lighting after the sky pass");
+    tests.expect(geFast3dShouldRestoreRoomLighting(2) != 0,
+                 "Remaster mode must restore room lighting after the sky pass");
+    tests.expect(geFast3dShouldRestoreRoomLighting(-1) == 0,
+                 "invalid lower render modes must not add lighting state");
+}
+
 int main()
 {
 #ifndef GE007_SOURCE_DIR
@@ -183,6 +195,7 @@ int main()
     test_ambient_copy_and_slot_matrix(tests);
     test_geometry_mode_transition(tests);
     test_lit_and_unlit_base_colour_policy(tests);
+    test_room_lighting_restore_respects_render_mode(tests);
     tests.expect(!bg.empty(), "ambient-lighting test could not read bg.c");
     tests.expect(!sky.empty(), "ambient-lighting test could not read sky.c");
     tests.expect(!pipeline.empty(),
@@ -207,6 +220,9 @@ int main()
 
     tests.expect(lights != std::string_view::npos,
                  "level render must submit the authored GlobalLight");
+    tests.expect(level_render.find("geFast3dShouldRestoreRoomLighting") !=
+                     std::string_view::npos,
+                 "room-lighting restore must be gated by render mode");
     tests.expect(restore != std::string_view::npos &&
                      level_render.substr(restore, 96).find("G_LIGHTING") !=
                          std::string_view::npos,

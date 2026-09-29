@@ -613,7 +613,7 @@ covers D24–D69; the log continues in §H (D32 procedure, D70–D121).
 | D323 | **RULE-2-SIGNOFF: local two-player co-op mode reusing the deathmatch character roster (user request, 2026-09-22).** — full `## D323` entry at file tail | PARTIAL — RULE-2-SIGNOFF / IMPLEMENTED; automated gates pass, while a real two-controller playtest remains owed. |
 | D324 | **F10 overlay vector-font text was queued into the wrong frame batch (found by unit test, 2026-09-23).** — full `## D324` entry at file tail | FIXED — current-frame late queue added and covered by deterministic tests; real GPU confirmation remains owed. |
 | D325 | **F10 overlay bitmap fallback used vector advance metrics (found by unit test, 2026-09-23).** — full `## D325` entry at file tail | FIXED — bitmap fallback now uses bitmap metrics and is covered by deterministic tests. |
-| D326 | **Dam's pre-modern dark-teal water became bright lavender/checkered in the current `Original` renderer (matched-camera comparison, 2026-09-29).** — full `## D326` entry at file tail | PARTIAL — an independent unsigned tile-window defect is fixed and regression-tested, but the colour change remains in the two-cycle CI8 `PRIM_LOD_FRAC` render path; do not revert the correct 64-bit display-list write merely to reproduce the old appearance. |
+| D326 | **Dam's pre-modern dark-teal water became bright lavender/checkered in the current `Original` renderer (matched-camera comparison, 2026-09-29).** — full `## D326` entry at file tail | FIXED — a port-only post-sky `G_LIGHTING` restore replaced the authored teal vertex `SHADE` with white in Original. The restore is now limited to Enhanced/Remaster; matched live capture is dark teal. |
 
 Phase 2 replaced the Phase-1 demo loop with the real `mainproc()` on real OS
 threads, compiled GE's real `src/sched.c`, and brought in PD's fast3d software
@@ -12366,13 +12366,24 @@ inverted rectangles and preserved the full-image masked case. Matched current
 captures with `Video.WrapFix=1` and `Video.WrapFix=0` are both lavender,
 however, so this defect is not the primary colour change.
 
+**Root cause and fix.** Matched live debugger traces at the exact water
+combiner resolved the remaining ambiguity. The pre-modern renderer reached the
+draw with geometry mode `0x12205` (`G_LIGHTING` clear) and authored vertex
+`SHADE=(27,51,40)`. Current Original reached the same draw with mode `0x32205`
+(`G_LIGHTING` set) and computed `SHADE=(255,255,255)`. The added bit came from
+the port-only post-sky room-lighting restore in `bgLevelRender`, not from CI8
+decode, tile selection, PostFX, or `PRIM_LOD_FRAC`. A tested render-mode policy
+now preserves the ROM state in Original and performs that restore only in
+Enhanced/Remaster. The existing animated LOD and 64-bit display-list ABI fix
+remain unchanged.
+
 **Evidence.** See
 `docs/dev/reviews/original-water-fidelity-2026-09-29.md` and its linked raw,
 side-by-side, and animation-cycle captures. No supported N64 emulator was
 available locally, so this review does not claim a matched-camera console
 oracle. Frigate/Surface sky-water and D229 are separate paths.
 
-**Status:** PARTIAL — the tile-window safety defect is fixed and tested; the
-remaining issue is the port renderer's two-cycle CI8 `TEXEL0`/`TEXEL1`
-interpolation under animated `PRIM_LOD_FRAC`. Preserve the 64-bit ABI fix and
-resolve the renderer path against a console reference.
+**Status:** FIXED — the policy test was observed failing before implementation,
+the focused renderer tests pass, and the same deterministic game camera now
+captures dark-teal animated water. The user confirmed that colour as the ROM
+target; no independently captured emulator screenshot is claimed.

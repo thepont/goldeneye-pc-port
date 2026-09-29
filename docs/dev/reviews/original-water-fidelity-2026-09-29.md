@@ -24,6 +24,11 @@ a complete sampled animation cycle:
 
 ![Current Original water animation samples](../../../artifacts/screenshots/original-water-fidelity/current-original-full-cycle.png)
 
+The corrected `Original` path preserves the ROM command state and restores the
+authored dark-teal modulation while retaining the animated two-texture blend:
+
+![Corrected Original Dam water](../../../artifacts/screenshots/original-water-fidelity/fixed-original-rom-water.png)
+
 This is a presentation change, not a replacement of the authored texture
 asset. The transition is associated with the renderer and display-list state
 handling introduced by `7324a9ce`.
@@ -52,6 +57,15 @@ handling introduced by `7324a9ce`.
    not the primary colour regression.
 6. Frigate/Surface sky-water and the D229 sky-water path are separate from
    this authored Dam room material.
+7. A matched live debugger trace identified the colour boundary. At the water
+   combiner, `9507669f` had `G_LIGHTING` clear and supplied the authored
+   `SHADE=(27,51,40)`. Current `Original` had `G_LIGHTING` set and replaced it
+   with computed `SHADE=(255,255,255)`. Texture tiles, TMEM selection, valid
+   light records, and the two-cycle combiner were otherwise intact.
+8. The extra state came from a port-only room-lighting restore added after the
+   sky pass. That restore now applies only to Enhanced and Remaster. Original
+   once again inherits the ROM display-list state; the modern tiers retain
+   their deliberate relighting path.
 
 ## Evidence
 
@@ -63,6 +77,9 @@ handling introduced by `7324a9ce`.
   — build `1d345f92`, `Original`, `Video.WrapFix=0`.
 - `artifacts/screenshots/original-water-fidelity/current-original-full-cycle.png`
   — current frames 120 through 360 sampled every 40 frames.
+- `artifacts/screenshots/original-water-fidelity/fixed-original-rom-water.png`
+  — corrected `Original` frame 160, captured from the running game with the
+  same deterministic camera and modern PostFX disabled.
 
 The pre-modern build did not support the newer frame-exit/dump-directory
 controls, so it was stopped after its deterministic frame capture. No supported
@@ -71,8 +88,9 @@ capture is claimed.
 
 ## Decision
 
-Keep the existing PC ABI correction and the new tile-wrap safety fix. Do not
-add a legacy/static-LOD compatibility switch: that would duplicate incorrect
-behavior and hide the unresolved renderer defect. The remaining work is to
-trace the Fast3D two-cycle CI8 `TEXEL0`/`TEXEL1` interpolation with animated
-`PRIM_LOD_FRAC` against an N64 reference, then correct that port-owned path.
+Keep the existing PC ABI correction and tile-wrap safety fix. Do not add a
+legacy/static-LOD compatibility switch: the animation and combiner were not
+the colour defect. Preserve the ROM room-lighting state in Original, and keep
+the port-only room-lighting restore scoped to Enhanced and Remaster. The user
+confirmed the dark-teal appearance as the ROM target; no independently
+captured emulator frame is claimed.

@@ -66,4 +66,13 @@ static inline void geFast3dSelectVertexBaseColor(uint32_t geometry_mode,
     }
 }
 
+/* The ROM room stream inherits the unlit state left by the sky pass.  Keep
+ * Original mode byte-for-byte compatible with that command-state behavior;
+ * only the modern presentation tiers opt into the port's room-lighting
+ * restore. */
+static inline int geFast3dShouldRestoreRoomLighting(int render_mode)
+{
+    return render_mode == 1 || render_mode == 2;
+}
+
 #endif /* GE007_FAST3D_AMBIENT_LIGHTING_H */

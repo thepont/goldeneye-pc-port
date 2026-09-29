@@ -22,6 +22,9 @@
 #include "bgroomtrans.h"
 #ifdef PORT
 #include "level_status_contract_policy.h"
+#include "../../port/fast3d/fast3d_ambient_lighting.h"
+
+int gfx_get_render_mode(void);
 #endif
 
 
@@ -1302,9 +1305,13 @@ Gfx *bgLevelRender(Gfx *arg0)
     gSPSetLights1(arg0++, GlobalLight);
 #ifdef PORT
     /* skyRender intentionally clears G_LIGHTING for its unlit fan. Reloading
-     * the light registers does not restore that geometry bit, so explicitly
-     * re-enable it before the room display lists consume GlobalLight. */
-    gSPSetGeometryMode(arg0++, G_LIGHTING);
+     * the light registers does not restore that geometry bit. Original mode
+     * preserves the ROM state (including Dam water's authored teal SHADE),
+     * while modern tiers opt into relighting the room display lists. */
+    if (geFast3dShouldRestoreRoomLighting(gfx_get_render_mode()))
+    {
+        gSPSetGeometryMode(arg0++, G_LIGHTING);
+    }
 #endif
     gSPLookAt(arg0++, sub_GAME_7F078474());
     gSPSegment(arg0++, SPSEGMENT_BG_DL, ptr_bg_data);
